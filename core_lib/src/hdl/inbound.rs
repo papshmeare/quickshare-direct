@@ -476,6 +476,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             .as_ref()
             .ok_or_else(|| anyhow!("Missing required fields"))?;
 
+        // What the phone can upgrade to (WIFI_DIRECT, WIFI_HOTSPOT, …) and its radio details:
+        // decides which bandwidth upgrade we can offer when there is no shared network.
+        info!(
+            "ConnectionRequest: upgrade mediums={:?} medium_metadata={:?}",
+            connection_request.mediums().collect::<Vec<_>>(),
+            connection_request.medium_metadata
+        );
+
         let endpoint_info = connection_request
             .endpoint_info
             .as_ref()
