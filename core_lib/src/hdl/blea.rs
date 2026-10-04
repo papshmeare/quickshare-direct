@@ -75,10 +75,6 @@ const RX_INNER_NAME: &str = "ReceiverAdvertiser";
 const QS_SERVICE_UUID: u16 = 0xFEF3;
 // 3-byte hash of the "NearbySharing" service id (matches the mDNS _FC9F5ED42C8A type).
 const QS_SVC_HASH: [u8; 3] = [0xfc, 0x9f, 0x5e];
-// endpoint_info identity bytes (2-byte salt + 14-byte metadata-key hash).
-const QS_EINFO_IDENTITY: [u8; 16] = [
-    0x4a, 0x22, 0x71, 0x16, 0x9c, 0x15, 0x99, 0xa2, 0x44, 0xaf, 0x44, 0xb0, 0x17, 0x9c, 0x0f, 0x23,
-];
 // Connections advertisement trailer after endpoint_info: bluetooth MAC(6) + extra(2).
 // The MAC is our adapter's address: the phone's first connection attempt is Bluetooth Classic
 // (RFCOMM, see rfcomm.rs) to exactly this address. (The original capture's MAC was a phone's.)
@@ -104,13 +100,8 @@ pub fn receiver_service_data(
     //   1B header: version(3b)=1 | visibility(1b)=0(visible) | device_type(3b) | reserved
     //   16B identity (2B salt + 14B metadata-key hash)
     //   1B name length + UTF-8 name (plaintext, since we're visible to "Everyone")
-    let mut einfo: Vec<u8> = Vec::new();
-    einfo.push((1 << 5) | ((device_type & 0x7) << 1));
-    einfo.extend_from_slice(&QS_EINFO_IDENTITY);
-    let mut name = device_name.as_bytes().to_vec();
-    name.truncate(255);
-    einfo.push(name.len() as u8);
-    einfo.extend_from_slice(&name);
+    // Same bytes as the mDNS "n" record (see utils::endpoint_info).
+    let einfo = crate::utils::endpoint_info(device_type, device_name);
 
     // Nearby Connections offline BLE advertisement carrying the endpoint id + info.
     let mut data: Vec<u8> = Vec::new();
@@ -147,7 +138,12 @@ impl ReceiverAdvertiser {
         let session = bluer::Session::new().await?;
         let adapter = session.default_adapter().await?;
         adapter.set_powered(true).await?;
-        let mac = adapter.address().await?.0;
+        // Must match the advertisement served over GATT (see lib.rs: opt-in Bluetooth Classic).
+        let mac = if std::env::var_os("QSD_BT_CLASSIC").is_some() {
+            adapter.address().await?.0
+        } else {
+            [0u8; 6]
+        };
 
         Ok(Self {
             adapter: Arc::new(adapter),

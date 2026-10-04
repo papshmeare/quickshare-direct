@@ -12,7 +12,7 @@
 //     `quickshare-ap.service`, started via `systemctl start` - allow it for the user with polkit);
 //   * NetworkManager (the hotspot is an NM connection in `shared` mode: it assigns 10.42.0.1 to
 //     the interface and runs DHCP for the phone);
-//   * `iw` and `nmcli` on PATH.
+//   * `nmcli` on PATH.
 // Environment overrides: QSD_AP_IFACE, QSD_AP_UNIT, QSD_STA_IFACE.
 
 use std::net::Ipv4Addr;
@@ -64,38 +64,39 @@ pub fn hotspot_available() -> bool {
         return true;
     }
     let unit = env_or("QSD_AP_UNIT", "quickshare-ap.service");
-    std::path::Path::new("/etc/systemd/system").join(&unit).exists()
+    std::path::Path::new("/etc/systemd/system")
+        .join(&unit)
+        .exists()
 }
 
-/// The Wi-Fi station interface and the frequency (MHz) it is connected on, if any.
-async fn station_frequency() -> Option<(String, i32)> {
-    let ifaces: Vec<String> = match std::env::var("QSD_STA_IFACE") {
-        Ok(i) => vec![i],
-        Err(_) => std::fs::read_dir("/sys/class/net")
-            .ok()?
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| std::path::Path::new(&format!("/sys/class/net/{n}/wireless")).exists())
-            .collect(),
-    };
-    for iface in ifaces {
-        if let Ok(info) = run("iw", &["dev", &iface, "info"]).await {
-            if !info.contains("type managed") {
-                continue;
-            }
-            // "channel 44 (5220 MHz), width: ..."
-            if let Some(mhz) = info
-                .split("channel ")
-                .nth(1)
-                .and_then(|s| s.split('(').nth(1))
-                .and_then(|s| s.split(' ').next())
-                .and_then(|s| s.parse::<i32>().ok())
+/// The frequency (MHz) of the Wi-Fi network we are connected to as a station, if any
+/// (from NetworkManager: `nmcli -g active,chan,freq dev wifi list` → "yes:44:5220 MHz").
+async fn station_frequency() -> Option<i32> {
+    let out = run("nmcli", &["-g", "active,chan,freq", "device", "wifi", "list", "--rescan", "no"])
+        .await
+        .ok()?;
+    out.lines()
+        .find(|l| l.starts_with("yes:"))
+        .and_then(|l| l.rsplit(':').next())
+        .and_then(|f| f.split_whitespace().next())
+        .and_then(|f| f.parse().ok())
+}
+
+/// Wait until NetworkManager manages a freshly created interface (state no longer "unmanaged").
+async fn wait_nm_managed(iface: &str) -> bool {
+    for _ in 0..50 {
+        if let Ok(out) = run("nmcli", &["-g", "DEVICE,STATE", "device"]).await {
+            if out
+                .lines()
+                .any(|l| l.starts_with(&format!("{iface}:")) && !l.ends_with(":unmanaged"))
             {
-                return Some((iface, mhz));
+                return true;
             }
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    None
+    // Last resort: ask NetworkManager to manage it.
+    run("nmcli", &["device", "set", iface, "managed", "yes"]).await.is_ok()
 }
 
 fn channel_of(mhz: i32) -> Option<(&'static str, i32)> {
@@ -110,6 +111,9 @@ fn channel_of(mhz: i32) -> Option<(&'static str, i32)> {
 impl Hotspot {
     pub async fn start() -> Result<Self, anyhow::Error> {
         let iface = env_or("QSD_AP_IFACE", "ap0");
+        // Read the station channel first: creating the AP interface can briefly disturb the
+        // station connection on some systems.
+        let sta = station_frequency().await;
         let mut unit = None;
         if !iface_exists(&iface) {
             let u = env_or("QSD_AP_UNIT", "quickshare-ap.service");
@@ -123,7 +127,10 @@ impl Hotspot {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             if !iface_exists(&iface) {
-                bail!("{iface} did not appear after starting {}", unit.as_deref().unwrap_or("?"));
+                bail!(
+                    "{iface} did not appear after starting {}",
+                    unit.as_deref().unwrap_or("?")
+                );
             }
         }
 
@@ -141,8 +148,10 @@ impl Hotspot {
 
         // Same channel as the station connection (single-channel AP+STA concurrency);
         // otherwise let NetworkManager pick a 5 GHz channel.
-        let sta = station_frequency().await;
-        let (band, channel, frequency) = match sta.as_ref().and_then(|(_, f)| channel_of(*f).map(|c| (c, *f))) {
+        if !wait_nm_managed(&iface).await {
+            warn!("{INNER_NAME}: NetworkManager doesn't manage {iface}");
+        }
+        let (band, channel, frequency) = match sta.and_then(|f| channel_of(f).map(|c| (c, f))) {
             Some(((band, ch), f)) => (band.to_string(), Some(ch), f),
             None => ("a".to_string(), None, -1),
         };
@@ -154,12 +163,36 @@ impl Hotspot {
         let _ = run("nmcli", &["connection", "delete", CONN_NAME]).await; // leftover from a crash
         let channel_s = channel.map(|c| c.to_string());
         let mut args: Vec<&str> = vec![
-            "connection", "add", "type", "wifi", "ifname", &iface, "con-name", CONN_NAME,
-            "autoconnect", "no", "ssid", &ssid,
-            "802-11-wireless.mode", "ap", "802-11-wireless.band", &band,
-            "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.proto", "rsn",
-            "wifi-sec.pairwise", "ccmp", "wifi-sec.group", "ccmp", "wifi-sec.psk", &password,
-            "ipv4.method", "shared", "ipv6.method", "disabled",
+            "connection",
+            "add",
+            "type",
+            "wifi",
+            "ifname",
+            &iface,
+            "con-name",
+            CONN_NAME,
+            "autoconnect",
+            "no",
+            "ssid",
+            &ssid,
+            "802-11-wireless.mode",
+            "ap",
+            "802-11-wireless.band",
+            &band,
+            "wifi-sec.key-mgmt",
+            "wpa-psk",
+            "wifi-sec.proto",
+            "rsn",
+            "wifi-sec.pairwise",
+            "ccmp",
+            "wifi-sec.group",
+            "ccmp",
+            "wifi-sec.psk",
+            &password,
+            "ipv4.method",
+            "shared",
+            "ipv6.method",
+            "disabled",
         ];
         if let Some(c) = channel_s.as_deref() {
             args.extend_from_slice(&["802-11-wireless.channel", c]);
@@ -199,7 +232,9 @@ impl Hotspot {
             .args(["connection", "delete", CONN_NAME])
             .output();
         if let Some(u) = &self.unit {
-            let _ = std::process::Command::new("systemctl").args(["stop", u]).output();
+            let _ = std::process::Command::new("systemctl")
+                .args(["stop", u])
+                .output();
         }
     }
 }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use bluer::gatt::local::{
-    Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
-    CharacteristicNotifier, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
+    Application, Characteristic, CharacteristicNotifier, CharacteristicNotify,
+    CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
     Service,
 };
 use bluer::{Adapter, Uuid, UuidExt};
@@ -95,7 +95,10 @@ impl ReceiverGattServer {
                             fun: Box::new(move |_req| {
                                 let advert = advert.clone();
                                 Box::pin(async move {
-                                    debug!("{INNER_NAME}: slot0 advertisement read ({} bytes)", advert.len());
+                                    debug!(
+                                        "{INNER_NAME}: slot0 advertisement read ({} bytes)",
+                                        advert.len()
+                                    );
                                     Ok(advert)
                                 })
                             }),

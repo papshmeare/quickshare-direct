@@ -2,8 +2,8 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use get_if_addrs::get_if_addrs;
 use hkdf::Hkdf;
@@ -81,22 +81,30 @@ pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
     URL_SAFE_NO_PAD.encode(&name_b)
 }
 
-pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
+/// Nearby Share endpoint info for this device, identical on every medium (mDNS TXT "n", the BLE
+/// advertisement and GATT slot 0). If they differ, a phone that discovered us over Bluetooth and
+/// then sees us again over mDNS (e.g. after rejoining Wi-Fi) treats it as a renamed endpoint and
+/// cancels the connection in progress.
+///   1 byte: Version(3 bits)=1 | Visibility(1 bit)=0 visible | Device Type(3 bits) | Reserved(1 bit)
+///   16 bytes: identity (salt + metadata key hash; random per run, not validated when visible)
+///   1 byte name length + UTF-8 name
+pub fn endpoint_info(device_type: u8, device_name: &str) -> Vec<u8> {
+    static IDENTITY: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    let identity = IDENTITY.get_or_init(|| rand::rng().random::<[u8; 16]>());
+
     let mut record = Vec::new();
-
-    // 1 byte: Version(3 bits)|Visibility(1 bit)|Device Type(3 bits)|Reserved(1 bits)
     // Device types: unknown=0, phone=1, tablet=2, laptop=3
-    record.push(device_type << 1);
+    record.push((1 << 5) | ((device_type & 0x7) << 1));
+    record.extend_from_slice(identity);
+    let mut name = device_name.as_bytes().to_vec();
+    name.truncate(255);
+    record.push(name.len() as u8);
+    record.extend_from_slice(&name);
+    record
+}
 
-    let unknown_bytes = rand::rng().random::<[u8; 16]>();
-    record.extend_from_slice(&unknown_bytes);
-
-    let device_name = device_name.as_bytes();
-    let length = device_name.len() as u8;
-    record.push(length);
-    record.extend_from_slice(device_name);
-
-    URL_SAFE_NO_PAD.encode(&record)
+pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
+    URL_SAFE_NO_PAD.encode(endpoint_info(device_type, device_name))
 }
 
 pub fn parse_mdns_endpoint_info(encoded_str: &str) -> Result<(DeviceType, String), anyhow::Error> {

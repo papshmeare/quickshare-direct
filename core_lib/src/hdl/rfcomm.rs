@@ -104,7 +104,11 @@ async fn serve(
         }
     });
 
-    let mut ir = InboundRequest::new(crate::hdl::MigratableStream::Ble(inbound_side), id.clone(), sender);
+    let mut ir = InboundRequest::new(
+        crate::hdl::MigratableStream::Ble(inbound_side),
+        id.clone(),
+        sender,
+    );
     ir.set_bwu_tcp_port(tcp_port);
     loop {
         if let Err(e) = ir.handle().await {

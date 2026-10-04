@@ -1026,7 +1026,10 @@ impl OutboundRequest {
                     continue;
                 }
                 let mut body = vec![0u8; len];
-                if stream_read_exact(&mut self.socket, &mut body).await.is_err() {
+                if stream_read_exact(&mut self.socket, &mut body)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 // Discard; keep draining until the peer closes or grace elapses.
