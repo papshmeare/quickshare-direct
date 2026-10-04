@@ -157,7 +157,11 @@ impl RQS {
 
         #[cfg(feature = "experimental")]
         {
-            if let Ok(ble) = BleListener::new(self.ble_sender.clone())
+            // QSD_NO_BLE_SCAN=1 (diagnostics): skip the sender-detection LE scan, which keeps the
+            // radio busy and may starve Bluetooth Classic page scan on some controllers.
+            if std::env::var_os("QSD_NO_BLE_SCAN").is_some() {
+                info!("BleListener: disabled (QSD_NO_BLE_SCAN)");
+            } else if let Ok(ble) = BleListener::new(self.ble_sender.clone())
                 .await
                 .inspect_err(|err| warn!("BleListener: {}", err))
             {
@@ -187,13 +191,38 @@ impl RQS {
             if *self.visibility_receiver.borrow() != Visibility::Invisible {
                 let rx_endpoint_id: [u8; 4] = endpoint_id[..4].try_into()?;
                 let rx_device_name = DEVICE_NAME.read().unwrap().clone();
+                // Our Bluetooth address goes into the advertisement: the phone's first
+                // connection attempt is Bluetooth Classic (RFCOMM) to that address.
+                let bt_mac = match bluer::Session::new().await {
+                    Ok(s) => match s.default_adapter().await {
+                        Ok(a) => a.address().await.map(|a| a.0).unwrap_or_default(),
+                        Err(_) => [0u8; 6],
+                    },
+                    Err(_) => [0u8; 6],
+                };
                 // Same advertisement bytes are used for the BLE advert and served
                 // over GATT slot 0, so the phone reads a consistent endpoint.
                 let advert = crate::hdl::receiver_service_data(
                     rx_endpoint_id,
                     crate::utils::DeviceType::Laptop as u8,
                     &rx_device_name,
+                    bt_mac,
                 );
+
+                // Bluetooth Classic (RFCOMM): the phone's preferred first connection.
+                let bt_sender = self.message_sender.clone();
+                let bt_tcp_port = binded_addr.port();
+                let bctk = ctoken.clone();
+                tracker.spawn(async move {
+                    match crate::hdl::RfcommServer::new(bt_sender, bt_tcp_port).await {
+                        Ok(srv) => {
+                            if let Err(e) = srv.run(bctk).await {
+                                error!("RfcommServer: {}", e);
+                            }
+                        }
+                        Err(e) => error!("Couldn't init RfcommServer: {}", e),
+                    }
+                });
 
                 // GATT server: when the phone selects us it opens a GATT connection,
                 // reads slot 0 for our advertisement, then drives the weave data

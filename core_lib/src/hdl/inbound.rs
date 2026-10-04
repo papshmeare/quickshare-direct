@@ -149,6 +149,12 @@ pub struct InboundRequest<S = TcpStream> {
     /// Set by the state machine when it's time to run the bandwidth-upgrade
     /// handoff; consumed by the BLE session loop (which owns a MigratableStream).
     bwu_pending: bool,
+    /// The sender's Wi-Fi IPv4 address from its ConnectionRequest (MediumMetadata), if it
+    /// has one: decides between a WIFI_LAN and a WIFI_HOTSPOT bandwidth upgrade.
+    peer_ip: Option<[u8; 4]>,
+    /// Hotspot hosted for this transfer (WIFI_HOTSPOT upgrade); removed when the request ends.
+    #[cfg(all(feature = "experimental", target_os = "linux"))]
+    hotspot: Option<crate::hdl::HotspotGuard>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
@@ -169,6 +175,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             receiver,
             bwu_tcp_port: None,
             bwu_pending: false,
+            peer_ip: None,
+            #[cfg(all(feature = "experimental", target_os = "linux"))]
+            hotspot: None,
         }
     }
 
@@ -215,7 +224,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
     /// over the current (BLE) channel advertising our TCP ip:port.
     async fn send_upgrade_path_available(&mut self, port: u16) -> Result<(), anyhow::Error> {
         use location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
-            EventType, UpgradePathInfo,
+            UpgradePathInfo,
             upgrade_path_info::{Medium, WifiLanSocket},
         };
 
@@ -225,21 +234,33 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             "BWU: offering WIFI_LAN upgrade at {}.{}.{}.{}:{port}",
             ip[0], ip[1], ip[2], ip[3]
         );
-
-        let frame = Self::bwu_frame(
-            EventType::UpgradePathAvailable,
-            Some(UpgradePathInfo {
-                medium: Some(Medium::WifiLan.into()),
-                wifi_lan_socket: Some(WifiLanSocket {
-                    ip_address: Some(ip.to_vec()),
-                    wifi_port: Some(port as i32),
-                }),
-                supports_client_introduction_ack: Some(true),
-                ..Default::default()
+        self.send_upgrade_path(UpgradePathInfo {
+            medium: Some(Medium::WifiLan.into()),
+            wifi_lan_socket: Some(WifiLanSocket {
+                ip_address: Some(ip.to_vec()),
+                wifi_port: Some(port as i32),
             }),
-            None,
-        );
+            supports_client_introduction_ack: Some(true),
+            ..Default::default()
+        })
+        .await
+    }
+
+    async fn send_upgrade_path(
+        &mut self,
+        info: location_nearby_connections::bandwidth_upgrade_negotiation_frame::UpgradePathInfo,
+    ) -> Result<(), anyhow::Error> {
+        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
+        let frame = Self::bwu_frame(EventType::UpgradePathAvailable, Some(info), None);
         self.encrypt_and_send(&frame).await
+    }
+
+    /// Whether the sender reported an address in the same /24 as ours (same Wi-Fi network).
+    fn peer_on_our_lan(&self) -> bool {
+        match (self.peer_ip, crate::utils::local_ipv4()) {
+            (Some(p), Some(l)) => p[..3] == l[..3] && p != [0, 0, 0, 0],
+            _ => false,
+        }
     }
 
     /// Build a plaintext CLIENT_INTRODUCTION_ACK (sent over the new TCP channel).
@@ -386,6 +407,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                 debug!("Handling State::Initial frame");
                 let frame = location_nearby_connections::OfflineFrame::decode(&*frame_data)?;
                 let rdi = self.process_connection_request(&frame)?;
+                self.peer_ip = frame
+                    .v1
+                    .as_ref()
+                    .and_then(|v| v.connection_request.as_ref())
+                    .and_then(|c| c.medium_metadata.as_ref())
+                    .and_then(|m| m.ip_address.as_ref())
+                    .and_then(|ip| <[u8; 4]>::try_from(ip.as_slice()).ok());
                 info!("RemoteDeviceInfo: {:?}", &rdi);
 
                 // Advance current state
@@ -1700,14 +1728,61 @@ impl InboundRequest<crate::hdl::MigratableStream> {
     pub async fn do_bwu(&mut self) -> Result<(), anyhow::Error> {
         use location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
 
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+        // Which path: the shared Wi-Fi (phone on our network) or a hotspot we host.
+        // QSD_BWU=lan|hotspot forces one; QSD_BWU_PORT fixes the listening port (firewalls).
+        let mode = std::env::var("QSD_BWU").unwrap_or_else(|_| "auto".into());
+        let use_hotspot = match mode.as_str() {
+            "hotspot" => true,
+            "lan" => false,
+            _ => !self.peer_on_our_lan() && crate::hdl::hotspot_available(),
+        };
+        let port: u16 = std::env::var("QSD_BWU_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0);
+        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
         let port = listener.local_addr()?.port();
 
-        // Offer WIFI_LAN over the encrypted BLE channel.
-        self.send_upgrade_path_available(port).await?;
+        let accept_timeout = if use_hotspot {
+            use location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+                UpgradePathInfo,
+                upgrade_path_info::{Medium, WifiHotspotCredentials},
+            };
+            let hs = match crate::hdl::Hotspot::start().await {
+                Ok(hs) => hs,
+                Err(e) => {
+                    warn!("BWU: couldn't start a hotspot ({e}); staying on Bluetooth");
+                    return Ok(());
+                }
+            };
+            info!(
+                "BWU: offering WIFI_HOTSPOT upgrade: {} (gateway {}:{port}, {} MHz)",
+                hs.ssid, hs.gateway, hs.frequency
+            );
+            let info = UpgradePathInfo {
+                medium: Some(Medium::WifiHotspot.into()),
+                wifi_hotspot_credentials: Some(WifiHotspotCredentials {
+                    ssid: Some(hs.ssid.clone()),
+                    password: Some(hs.password.clone()),
+                    port: Some(port as i32),
+                    gateway: Some(hs.gateway.to_string()),
+                    frequency: Some(hs.frequency),
+                }),
+                supports_client_introduction_ack: Some(true),
+                ..Default::default()
+            };
+            self.hotspot = Some(crate::hdl::HotspotGuard(hs));
+            self.send_upgrade_path(info).await?;
+            // Joining a new network takes the phone a few seconds.
+            Duration::from_secs(30)
+        } else {
+            // Offer WIFI_LAN over the encrypted BLE channel.
+            self.send_upgrade_path_available(port).await?;
+            Duration::from_secs(15)
+        };
 
         // Wait for the phone to connect over TCP; if it doesn't, stay on BLE.
-        let mut tcp = match tokio::time::timeout(Duration::from_secs(15), listener.accept()).await {
+        let mut tcp = match tokio::time::timeout(accept_timeout, listener.accept()).await {
             Ok(Ok((s, peer))) => {
                 info!("BWU: phone connected over TCP from {peer}");
                 s
@@ -1795,7 +1870,10 @@ impl InboundRequest<crate::hdl::MigratableStream> {
 
         // Swap to the TCP channel; the payload loop resumes over Wi-Fi.
         self.socket = crate::hdl::MigratableStream::Tcp(tcp);
-        info!("BWU: upgraded to Wi-Fi-LAN; payload continues over TCP");
+        info!(
+            "BWU: upgraded to {}; payload continues over TCP",
+            if self.hotspot.is_some() { "our Wi-Fi hotspot" } else { "Wi-Fi LAN" }
+        );
         Ok(())
     }
 }

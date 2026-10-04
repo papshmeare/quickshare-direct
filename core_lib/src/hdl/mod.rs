@@ -20,6 +20,14 @@ mod gatt;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
 pub use gatt::*;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
+mod hotspot;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+pub use hotspot::*;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+mod rfcomm;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+pub use rfcomm::*;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
 mod migratable;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
 pub use migratable::*;

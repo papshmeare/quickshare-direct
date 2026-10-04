@@ -80,7 +80,9 @@ const QS_EINFO_IDENTITY: [u8; 16] = [
     0x4a, 0x22, 0x71, 0x16, 0x9c, 0x15, 0x99, 0xa2, 0x44, 0xaf, 0x44, 0xb0, 0x17, 0x9c, 0x0f, 0x23,
 ];
 // Connections advertisement trailer after endpoint_info: bluetooth MAC(6) + extra(2).
-const QS_CONN_MAC_EXTRA: [u8; 8] = [0xfc, 0x41, 0x16, 0xb6, 0x17, 0x20, 0x00, 0x00];
+// The MAC is our adapter's address: the phone's first connection attempt is Bluetooth Classic
+// (RFCOMM, see rfcomm.rs) to exactly this address. (The original capture's MAC was a phone's.)
+const QS_CONN_EXTRA: [u8; 2] = [0x00, 0x00];
 // Mediums advertisement trailer: device_token(2) + extra(1) + appended presence DEs.
 const QS_MEDIUMS_TRAILING: [u8; 69] = [
     0x62, 0xf1, 0x03, 0x00, 0x82, 0x3f, 0xa0, 0x17, 0xfd, 0xf1, 0x70, 0x59, 0x6e, 0x1e, 0xd3, 0x4d,
@@ -92,7 +94,12 @@ const QS_MEDIUMS_TRAILING: [u8; 69] = [
 
 /// Build the 0xFEF3 service data advertising this device as a QuickShare
 /// receiver endpoint. `endpoint_id` must be the same 4 bytes used by MDnsServer.
-pub fn receiver_service_data(endpoint_id: [u8; 4], device_type: u8, device_name: &str) -> Vec<u8> {
+pub fn receiver_service_data(
+    endpoint_id: [u8; 4],
+    device_type: u8,
+    device_name: &str,
+    bt_mac: [u8; 6],
+) -> Vec<u8> {
     // Inner Nearby Share application advertisement (== the mDNS "n" TXT record):
     //   1B header: version(3b)=1 | visibility(1b)=0(visible) | device_type(3b) | reserved
     //   16B identity (2B salt + 14B metadata-key hash)
@@ -112,7 +119,8 @@ pub fn receiver_service_data(endpoint_id: [u8; 4], device_type: u8, device_name:
     data.extend_from_slice(&endpoint_id);
     data.push(einfo.len() as u8);
     data.extend_from_slice(&einfo);
-    data.extend_from_slice(&QS_CONN_MAC_EXTRA);
+    data.extend_from_slice(&bt_mac);
+    data.extend_from_slice(&QS_CONN_EXTRA);
 
     // Mediums BLE advertisement wrapper (+ appended presence data elements).
     let mut sd: Vec<u8> = Vec::new();
@@ -139,10 +147,11 @@ impl ReceiverAdvertiser {
         let session = bluer::Session::new().await?;
         let adapter = session.default_adapter().await?;
         adapter.set_powered(true).await?;
+        let mac = adapter.address().await?.0;
 
         Ok(Self {
             adapter: Arc::new(adapter),
-            service_data: receiver_service_data(endpoint_id, device_type, device_name),
+            service_data: receiver_service_data(endpoint_id, device_type, device_name, mac),
         })
     }
 

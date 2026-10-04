@@ -28,6 +28,28 @@ receiver `core_lib/examples/rx_service.rs` on NixOS (BlueZ 5.86, MediaTek MT7922
   use USB adb to drive the share sheet and read `logcat` (tags `NearbyConnections`,
   `NearbyMediums`, `NearbySharing`).
 
+## 2026-10-05: Bluetooth Classic + hotspot upgrade (work in progress)
+
+- Advertisement now carries the adapter's real MAC; `RfcommServer` (rfcomm.rs) registers the
+  NearbySharing RFCOMM service (`a82efa21-ae5c-3dde-9bbc-f16da7b16c5a`, insecure, no pairing).
+  The phone now pages the right address, but gets `PAGE_TIMEOUT`:
+  - BlueZ keeps the adapter **not connectable** unless discoverable (`btmgmt info` lacks
+    "connectable"). Fix needs root once: `btmgmt connectable on` (NixOS: a oneshot service).
+  - Even when connectable/discoverable, still `PAGE_TIMEOUT` on MT7922; under investigation.
+    The phone then falls back to BLE (weave) after ~5 s, which works.
+- BLE weave throughput measured: **~5 KB/s** (960 KB in ~3 min). Unusable for real files,
+  hence the bandwidth upgrade is essential.
+- The phone's ConnectionRequest lists upgrade mediums
+  `[WifiLan, WifiDirect, WifiAware, WifiHotspot, WebRtc, BleL2cap, Bluetooth, Ble, Nfc]` and its
+  MediumMetadata (Wi-Fi IP, AP frequency, usable channels). A Pixel 10 that dropped Wi-Fi for
+  discovery had already rejoined (same /24) by the time it sent the ConnectionRequest; the
+  earlier WIFI_LAN upgrade only failed because the upgrade listener used a random port.
+- New: `QSD_BWU_PORT` (fixed upgrade port), and a **WIFI_HOTSPOT upgrade** (hotspot.rs):
+  temporary WPA2 hotspot via NetworkManager (`shared` mode → 10.42.0.1 + DHCP) on a virtual AP
+  interface (`ap0`, created by a root oneshot unit the user may start via polkit), same channel
+  as the station connection. Chosen when the phone isn't on our /24 (`QSD_BWU=lan|hotspot`
+  forces one).
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -35,4 +57,5 @@ receiver `core_lib/examples/rx_service.rs` on NixOS (BlueZ 5.86, MediaTek MT7922
 2. Bluetooth Classic (RFCOMM) first contact, the phone's preferred initial medium.
 3. Bandwidth upgrade hosted by the laptop: WIFI_DIRECT (group owner) and WIFI_HOTSPOT, so the
    transfer runs at Wi-Fi speed with no shared network.
-4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case.
+4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case. (done)
+5. App integration: desktop notification when a file arrives, with an "Open folder" action.
