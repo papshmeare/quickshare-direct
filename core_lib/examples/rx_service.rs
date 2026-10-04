@@ -1,6 +1,11 @@
 // End-to-end receive test: runs the full RQS service (mDNS + TCP + the new
 // 0xFEF3 BLE receiver advert), auto-accepts any incoming transfer, and logs the
-// state machine. Point a phone at "Packet Linux RX" and send a file.
+// state machine. Point a phone at the device name and send a file.
+//
+// Environment (all optional):
+//   QSD_DIR   download folder        (default: ./received)
+//   QSD_PORT  fixed TCP port         (default: random; fix it to allow it through a firewall)
+//   QSD_NAME  advertised device name (default: "Packet Linux RX")
 #[macro_use]
 extern crate log;
 
@@ -22,23 +27,24 @@ async fn main() -> Result<(), anyhow::Error> {
         })
         .init();
 
-    let download_dir = PathBuf::from(
-        "/tmp/claude-1000/-home-martin-oss-source-packet/6d421b9d-5f3a-44f4-84f2-92b8a92b8649/scratchpad/received",
-    );
+    let download_dir =
+        PathBuf::from(std::env::var("QSD_DIR").unwrap_or_else(|_| "received".to_string()));
+    let port: Option<u32> = std::env::var("QSD_PORT").ok().and_then(|p| p.parse().ok());
+    let name = std::env::var("QSD_NAME").unwrap_or_else(|_| "Packet Linux RX".to_string());
     std::fs::create_dir_all(&download_dir).ok();
 
     let mut rqs = RQS::new(
         Visibility::Visible,
-        None,
+        port,
         Some(download_dir.clone()),
-        Some("Packet Linux RX".to_string()),
+        Some(name.clone()),
     );
     rqs.run().await?;
     println!(
         "RQS receive service running: mDNS + TCP + BLE 0xFEF3 receiver advert. Downloads -> {}",
         download_dir.display()
     );
-    println!("On the phone, open Quick Share -> Send and look for 'Packet Linux RX'. Ctrl-C to stop.");
+    println!("On the phone, open Quick Share -> Send and look for '{name}'. Ctrl-C to stop.");
 
     // Auto-accept any inbound transfer so a file actually lands.
     let sender = rqs.message_sender.clone();

@@ -1,3 +1,29 @@
+# quickshare-direct
+
+**Quick Share (Nearby Share) for Linux that doesn't need both devices on the same Wi-Fi.**
+
+Existing Linux implementations only transfer over a shared local network. Phone-to-phone Quick
+Share doesn't need one: devices find each other over Bluetooth and then move the data over a
+direct Wi-Fi link. This fork adds that path for Linux:
+
+| | Status |
+|---|---|
+| Discovery + transfer over the local network (mDNS/TCP) | from rQuickShare |
+| Discovery by phones that dropped off Wi-Fi (Pixel 10 etc.), transfer over Bluetooth LE ("weave" socket), upgrade to the shared Wi-Fi | from [martinalderson's branch](https://github.com/martinalderson/rquickshare/tree/feat/ble-receiver-connect-back), see [docs/BLE_RECEIVER_DISCOVERY.md](docs/BLE_RECEIVER_DISCOVERY.md) |
+| Upgrade to a **direct Wi-Fi link hosted by the laptop** (Wi-Fi Direct / hotspot), so fast transfers work with no shared network | **in progress** (this fork) |
+
+Built on [rQuickShare](https://github.com/Martichou/rquickshare) by Martichou and contributors,
+with Bluetooth work by [nozwock](https://github.com/nozwock) and
+[martinalderson](https://github.com/martinalderson). Protocol reference: Google's
+[Nearby](https://github.com/google/nearby) library (Apache-2.0). License: GPL-3.0, like rQuickShare.
+
+Development: `nix develop` (see `flake.nix`), then in `core_lib`:
+`QSD_DIR=~/Downloads QSD_PORT=46257 QSD_NAME=$(hostname) cargo run --example rx_service`
+
+---
+
+*Original rQuickShare README below.*
+
 <div align="center">
   <h1>rquickshare</h1>
 
