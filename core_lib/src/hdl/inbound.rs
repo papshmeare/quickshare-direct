@@ -246,7 +246,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         match std::env::var("QSD_BWU").unwrap_or_else(|_| "auto".into()).as_str() {
             "hotspot" => true,
             "lan" => false,
-            _ => !self.peer_on_our_lan() && crate::hdl::hotspot_available(),
+            // A direct link beats the shared Wi-Fi even when both devices are on it: the router
+            // path crosses the air twice on one channel (measured 2.4 MB/s vs 33-37 MB/s for the
+            // 80 MHz Wi-Fi Direct link, see docs/DEV_NOTES.md). LAN only without the helper.
+            _ => crate::hdl::hotspot_available(),
         }
     }
 
