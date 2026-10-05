@@ -13,7 +13,7 @@ use p256::{EncodedPoint, PublicKey};
 use prost::Message;
 use rand::Rng;
 use sha2::{Digest, Sha256, Sha512};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -159,6 +159,9 @@ pub struct InboundRequest<S = TcpStream> {
     /// Set by the state machine when it's time to run the bandwidth-upgrade
     /// handoff; consumed by the BLE session loop (which owns a MigratableStream).
     bwu_pending: bool,
+    /// Length prefix of the next frame, filled by cancel-safe partial reads (see handle()).
+    len_buf: [u8; 4],
+    len_have: usize,
     /// The sender's Wi-Fi IPv4 address from its ConnectionRequest (MediumMetadata), if it
     /// has one: decides between a WIFI_LAN and a WIFI_HOTSPOT bandwidth upgrade.
     peer_ip: Option<[u8; 4]>,
@@ -206,6 +209,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             receiver,
             bwu_tcp_port: None,
             bwu_pending: false,
+            len_buf: [0; 4],
+            len_have: 0,
             peer_ip: None,
             #[cfg(all(feature = "experimental", target_os = "linux"))]
             hotspot: None,
@@ -377,9 +382,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
-        // Buffer for the 4-byte length
-        let mut length_buf = [0u8; 4];
-
+        // The socket branch below must be cancel-safe: the channel branch fires for every state
+        // update the library broadcasts (many per second while receiving), and a cancelled
+        // read_exact() would drop the bytes already read and desync the stream (transfers then
+        // stalled at a random point). A single read() either completes or reads nothing, so the
+        // length prefix is accumulated in self.len_buf across calls.
         tokio::select! {
             i = self.receiver.recv() => {
                 match i {
@@ -426,10 +433,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                     }
                 }
             },
-            h = stream_read_exact(&mut self.socket, &mut length_buf) => {
-                h?;
-
-                self._handle(length_buf).await?
+            n = self.socket.read(&mut self.len_buf[self.len_have..]) => {
+                let n = n?;
+                if n == 0 {
+                    return Err(anyhow!(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+                }
+                self.len_have += n;
+                if self.len_have == 4 {
+                    self.len_have = 0;
+                    let length_buf = self.len_buf;
+                    self._handle(length_buf).await?
+                }
             }
         }
 
@@ -1797,7 +1811,7 @@ impl InboundRequest<crate::hdl::MigratableStream> {
         let accept_timeout = if use_hotspot {
             use location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
                 UpgradePathInfo,
-                upgrade_path_info::{Medium, WifiHotspotCredentials},
+                upgrade_path_info::{Medium, WifiDirectCredentials, WifiHotspotCredentials},
             };
             let hs = match hotspot_task.expect("checked").await {
                 Ok(Ok(hs)) => hs,
@@ -1811,20 +1825,38 @@ impl InboundRequest<crate::hdl::MigratableStream> {
                 }
             };
             info!(
-                "BWU: offering WIFI_HOTSPOT upgrade: {} (gateway {}:{port}, {} MHz)",
-                hs.ssid, hs.gateway, hs.frequency
+                "BWU: offering {} upgrade: {} (gateway {}:{port}, {} MHz)",
+                if hs.wifi_direct { "WIFI_DIRECT" } else { "WIFI_HOTSPOT" },
+                hs.ssid,
+                hs.gateway,
+                hs.frequency
             );
-            let info = UpgradePathInfo {
-                medium: Some(Medium::WifiHotspot.into()),
-                wifi_hotspot_credentials: Some(WifiHotspotCredentials {
-                    ssid: Some(hs.ssid.clone()),
-                    password: Some(hs.password.clone()),
-                    port: Some(port as i32),
-                    gateway: Some(hs.gateway.to_string()),
-                    frequency: Some(hs.frequency),
-                }),
-                supports_client_introduction_ack: Some(true),
-                ..Default::default()
+            let info = if hs.wifi_direct {
+                UpgradePathInfo {
+                    medium: Some(Medium::WifiDirect.into()),
+                    wifi_direct_credentials: Some(WifiDirectCredentials {
+                        ssid: Some(hs.ssid.clone()),
+                        password: Some(hs.password.clone()),
+                        port: Some(port as i32),
+                        frequency: Some(hs.frequency),
+                        gateway: Some(hs.gateway.to_string()),
+                    }),
+                    supports_client_introduction_ack: Some(true),
+                    ..Default::default()
+                }
+            } else {
+                UpgradePathInfo {
+                    medium: Some(Medium::WifiHotspot.into()),
+                    wifi_hotspot_credentials: Some(WifiHotspotCredentials {
+                        ssid: Some(hs.ssid.clone()),
+                        password: Some(hs.password.clone()),
+                        port: Some(port as i32),
+                        gateway: Some(hs.gateway.to_string()),
+                        frequency: Some(hs.frequency),
+                    }),
+                    supports_client_introduction_ack: Some(true),
+                    ..Default::default()
+                }
             };
             self.hotspot = Some(crate::hdl::HotspotGuard(hs));
             self.send_upgrade_path(info).await?;

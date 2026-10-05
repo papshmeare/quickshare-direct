@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# quickshare-ap: temporary Wi-Fi hotspot for Quick Share transfers (runs as root, started on
+# quickshare-ap: temporary direct Wi-Fi link for Quick Share transfers (runs as root, started on
 # demand by the receiver via `systemctl start quickshare-ap`; see quickshare-ap.service).
 #
-# Creates a virtual access-point interface next to the normal Wi-Fi connection (the station keeps
-# working), on the station's channel (most chips can only run AP+STA on one channel), with a random
-# SSID/password, hostapd for the AP and dnsmasq for DHCP. Writes the credentials to
+# Two ways, next to the normal Wi-Fi connection (which keeps working), on its channel:
+#   p2p (default): a Wi-Fi Direct group (we are group owner) via wpa_supplicant's D-Bus API. Phones
+#        join Wi-Fi Direct on a separate virtual interface, so it doesn't fight with the phone
+#        reconnecting to its usual Wi-Fi (a plain hotspot does: the phone has to leave its network).
+#   ap:  a hotspot on a virtual AP interface with hostapd (fallback if p2p fails).
+# dnsmasq gives the phone an address. Writes mode/ssid/password/frequency/gateway to
 # $RUNTIME_DIRECTORY/credentials (group-readable) for the receiver, which sends them to the phone
 # over the encrypted Bluetooth channel. Everything is removed when the service stops.
 #
-# Environment: QS_STA (station interface, default: first managed Wi-Fi interface),
+# Environment: QS_MODE (p2p or ap, default p2p),
+#              QS_STA (station interface, default: first managed Wi-Fi interface),
 #              QS_AP (AP interface name, default ap0), QS_GROUP (group allowed to read credentials,
 #              default users), QS_SUBNET (default 10.42.0).
-# Needs: iw, iproute2, hostapd, dnsmasq. NetworkManager must leave $QS_AP unmanaged.
+# Needs: iw, iproute2, hostapd, dnsmasq, busctl (systemd), wpa_supplicant with P2P + D-Bus (p2p).
+# NetworkManager must leave $QS_AP and p2p-<sta>-* unmanaged.
 set -euo pipefail
 
 AP=${QS_AP:-ap0}
@@ -21,8 +26,31 @@ DIR=${RUNTIME_DIRECTORY:-/run/quickshare}
 mkdir -p "$DIR"
 STA=${QS_STA:-$(iw dev | awk '/Interface/{i=$2} /type managed/{print i; exit}')}
 
+WPAS=fi.w1.wpa_supplicant1
+# wpa_supplicant D-Bus object of an interface name (e.g. p2p-dev-wlp4s0), or nothing.
+wpas_obj() {
+  local p
+  for p in $(busctl get-property $WPAS /fi/w1/wpa_supplicant1 $WPAS Interfaces | grep -o '"/[^"]*"' | tr -d '"'); do
+    [ "$(busctl get-property $WPAS "$p" $WPAS.Interface Ifname 2>/dev/null)" = "s \"$1\"" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+# Let the phone reach us on the link interface (its name varies, e.g. p2p-wlp4s0-3). nftables
+# firewalls only; QS_NFT_CHAIN="family table chain" (default: NixOS "inet nixos-fw input-allow").
+NFT_CHAIN=${QS_NFT_CHAIN:-inet nixos-fw input-allow}
+nft_allow() {
+  command -v nft >/dev/null || return 0
+  # shellcheck disable=SC2086
+  NFT_HANDLE=$(nft --echo --handle insert rule $NFT_CHAIN iifname "$1" accept comment quickshare 2>/dev/null |
+    sed -n 's/.*# handle \([0-9]*\).*/\1/p') || true
+}
+
 cleanup() {
+  # shellcheck disable=SC2086
+  [ -n "${NFT_HANDLE:-}" ] && nft delete rule $NFT_CHAIN handle "$NFT_HANDLE" 2>/dev/null || true
   [ -n "${DNSMASQ:-}" ] && kill "$DNSMASQ" 2>/dev/null || true
+  [ -n "${GOBJ:-}" ] && busctl call $WPAS "$GOBJ" $WPAS.Interface.P2PDevice Disconnect 2>/dev/null || true
   [ -f "$DIR/hostapd.pid" ] && kill "$(cat "$DIR/hostapd.pid")" 2>/dev/null || true
   iw dev "$AP" del 2>/dev/null || true
   rm -f "$DIR/credentials" "$DIR/hostapd.conf" "$DIR/hostapd.pid" "$DIR/leases"
@@ -35,11 +63,38 @@ read -r CHAN FREQ < <(iw dev "$STA" info 2>/dev/null |
   sed -n 's/.*channel \([0-9]*\) (\([0-9]*\) MHz.*/\1 \2/p') || true
 if [ -z "${CHAN:-}" ]; then CHAN=36; FREQ=5180; fi   # not connected: any non-DFS 5 GHz channel
 
-iw dev "$AP" del 2>/dev/null || true
-iw dev "$STA" interface add "$AP" type __ap
-
 # Read a finite amount of randomness (tr < /dev/urandom | head would end in SIGPIPE + pipefail).
 rnd() { head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c "1-$1"; }
+
+# Wi-Fi Direct group owner via wpa_supplicant; sets IF, SSID, PASS, GOBJ. Returns 1 if unavailable.
+start_p2p() {
+  local dev grp ssid_bytes i
+  # The P2P device functions live on the station interface's object (P2PDevice interface).
+  dev=$(wpas_obj "$STA") || { echo "quickshare-ap: $STA not in wpa_supplicant" >&2; return 1; }
+  busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 2 \
+    persistent b false frequency i "$FREQ" >/dev/null || return 1
+  for i in $(seq 50); do
+    IF=$(ls /sys/class/net | grep "^p2p-$STA-" | head -1 || true)
+    [ -n "$IF" ] && GOBJ=$(wpas_obj "$IF") && break
+    sleep 0.1
+  done
+  [ -n "${GOBJ:-}" ] || { echo "quickshare-ap: P2P group interface didn't appear" >&2; return 1; }
+  for i in $(seq 50); do
+    grp=$(busctl get-property $WPAS "$GOBJ" $WPAS.Interface.P2PDevice Group 2>/dev/null | grep -o '"/[^"]*"' | tr -d '"' || true)
+    [ -n "$grp" ] && [ "$grp" != "/" ] && break
+    sleep 0.1
+  done
+  # SSID property is "ay N b1 b2 ...": bytes → string
+  ssid_bytes=$(busctl get-property $WPAS "$grp" $WPAS.Group SSID | cut -d' ' -f3-)
+  SSID=$(for b in $ssid_bytes; do printf "\\x$(printf %02x "$b")"; done)
+  PASS=$(busctl get-property $WPAS "$grp" $WPAS.Group Passphrase | sed 's/^s "\(.*\)"$/\1/')
+  [ -n "$SSID" ] && [ -n "$PASS" ]
+}
+
+start_ap() {
+IF=$AP
+iw dev "$AP" del 2>/dev/null || true
+iw dev "$STA" interface add "$AP" type __ap
 SSID="QuickShare-$(rnd 6)"
 PASS="$(rnd 16)"
 
@@ -77,21 +132,31 @@ if ! hostapd -B -P "$DIR/hostapd.pid" "$DIR/hostapd.conf" >/dev/null; then
   sed -i '/^ht_capab=/d; /^vht_/d; /^ieee80211ac=/d' "$DIR/hostapd.conf"
   hostapd -B -P "$DIR/hostapd.pid" "$DIR/hostapd.conf" >/dev/null
 fi
+}
 
-ip addr add "$NET.1/24" dev "$AP"
-ip link set "$AP" up
+MODE=${QS_MODE:-p2p}
+if [ "$MODE" = p2p ] && ! start_p2p; then
+  echo "quickshare-ap: Wi-Fi Direct failed, using a hotspot instead" >&2
+  [ -n "${GOBJ:-}" ] && busctl call $WPAS "$GOBJ" $WPAS.Interface.P2PDevice Disconnect 2>/dev/null || true
+  GOBJ=; MODE=ap
+fi
+[ "$MODE" = ap ] && start_ap
+
+ip addr add "$NET.1/24" dev "$IF"
+ip link set "$IF" up
+nft_allow "$IF"
 dnsmasq --keep-in-foreground --conf-file=/dev/null --port=0 \
-  --interface="$AP" --bind-interfaces --except-interface=lo \
+  --interface="$IF" --bind-interfaces --except-interface=lo \
   --dhcp-range="$NET.10,$NET.254,255.255.255.0,1h" \
   --dhcp-leasefile="$DIR/leases" &
 DNSMASQ=$!
 
 umask 027
-printf 'ssid=%s\npassword=%s\nfrequency=%s\ngateway=%s\n' "$SSID" "$PASS" "$FREQ" "$NET.1" \
+printf 'mode=%s\nssid=%s\npassword=%s\nfrequency=%s\ngateway=%s\n' "$MODE" "$SSID" "$PASS" "$FREQ" "$NET.1" \
   > "$DIR/credentials.tmp"
 chgrp "$GROUP" "$DIR/credentials.tmp" "$DIR"
 chmod 0750 "$DIR"
 mv "$DIR/credentials.tmp" "$DIR/credentials"
-echo "quickshare-ap: $SSID on $AP, channel $CHAN ($FREQ MHz), next to $STA"
+echo "quickshare-ap: $MODE $SSID on $IF, channel $CHAN ($FREQ MHz), next to $STA"
 
 wait "$DNSMASQ"

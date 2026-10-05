@@ -77,6 +77,21 @@ Fixes on the way:
   (`QSD_BT_CLASSIC=1`) with the real MAC, because RFCOMM still fails ("read failed") and its
   retries delay BLE by ~5 s.
 
+## 2026-10-05: Wi-Fi Direct + notification daemon
+
+- A plain hotspot fails when the phone reconnects to its usual Wi-Fi at the same moment (one
+  station radio: joining our hotspot took 12 s, over the phone's 15 s upgrade budget). The helper
+  now creates a **Wi-Fi Direct group** (we are GO) via wpa_supplicant D-Bus (`P2PDevice.GroupAdd`
+  on the station interface's object), in ~230 ms; phones join it on a separate P2P interface.
+  Offered as `WIFI_DIRECT`; hotspot stays as fallback. 75 MB from a phone off Wi-Fi: byte-identical,
+  ~5 MB/s; the phone took ~16 s to join but didn't time out.
+- Phone on the same Wi-Fi → `WIFI_LAN` upgrade on the fixed port, connects in ~0.2 s.
+- Fixed a stall at a random point mid-transfer: `handle()` raced the frame-length `read_exact`
+  against the state-update channel in `select!`; a cancelled read lost bytes and desynced the
+  stream. The length prefix is now read with cancel-safe single reads.
+- `quickshare-direct` binary: receiver + notifications (Accept/Decline with PIN, "Open folder",
+  "Open" for links, "Copy" for text) via notify-send actions; tested with swaync.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle

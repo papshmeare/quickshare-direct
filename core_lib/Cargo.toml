@@ -9,6 +9,10 @@ authors = ["martichou"]
 name = "core_bin"
 path = "src/bin.rs"
 
+[[bin]]
+name = "quickshare-direct"
+path = "src/bin/quickshare-direct.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 bluer = { version = "0.17", features = ["full"], optional = true }
 

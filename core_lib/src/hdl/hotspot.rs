@@ -37,6 +37,8 @@ pub struct Hotspot {
     unit: Option<String>,
     /// Started via the root helper unit (hostapd + dnsmasq), which also removes it.
     helper: bool,
+    /// The helper made a Wi-Fi Direct group (offer WIFI_DIRECT) rather than a hotspot.
+    pub wifi_direct: bool,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -156,6 +158,7 @@ impl Hotspot {
             iface: env_or("QSD_AP_IFACE", "ap0"),
             unit: Some(unit),
             helper: true,
+            wifi_direct: get("mode").as_deref() == Some("p2p"),
         };
         info!("{INNER_NAME}: {} up (gateway {}, {} MHz)", hs.ssid, hs.gateway, hs.frequency);
         Ok(hs)
@@ -259,6 +262,7 @@ impl Hotspot {
             iface,
             unit,
             helper: false,
+            wifi_direct: false,
         };
         if let Err(e) = run("nmcli", &["--wait", "20", "connection", "up", CONN_NAME]).await {
             hs.stop_blocking();
