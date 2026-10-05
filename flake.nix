@@ -87,7 +87,7 @@
               environment = { QS_STA = cfg.wifiInterface; QS_AP = "ap0"; QS_GROUP = "users"; QS_MODE = cfg.mode; };
               serviceConfig = {
                 Type = "simple";
-                ExecStart = "${pkg}/libexec/quickshare-ap";
+                ExecStart = "${pkgs.bash}/bin/bash ${pkg}/libexec/quickshare-ap";
                 ExecStopPost = "-${pkgs.iw}/bin/iw dev ap0 del";
                 RuntimeDirectory = "quickshare";
                 RuntimeDirectoryMode = "0750";
