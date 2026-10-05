@@ -50,12 +50,38 @@ receiver `core_lib/examples/rx_service.rs` on NixOS (BlueZ 5.86, MediaTek MT7922
   as the station connection. Chosen when the phone isn't on our /24 (`QSD_BWU=lan|hotspot`
   forces one).
 
+## 2026-10-05: goal reached, phone off Wi-Fi → laptop hotspot at Wi-Fi speed
+
+End-to-end with a Pixel 10 that had dropped Wi-Fi: BLE discovery + weave first contact, UKEY2/PIN,
+receiver starts a hotspot **in the background** (`quickshare-ap` helper: hostapd + dnsmasq on a
+virtual `ap0` next to the station, same channel, up in ~120-250 ms), offers `WIFI_HOTSPOT`
+credentials over the encrypted BLE channel, the phone joins (associates in ~1 s, TCP after ~4.7 s),
+the payload moves to TCP. **75 MB in ~18 s (~4.2 MB/s), byte-identical**; the laptop's own Wi-Fi
+stays connected; the hotspot is removed afterwards.
+
+Fixes on the way:
+- Starting the hotspot blocked the handshake (NetworkManager AP start took 3-10 s): the phone
+  timed out. Now started in a background task right after the ConnectionResponse; offered as soon
+  as it is up.
+- NetworkManager scans on an idle AP interface delay `AP-ENABLED` by 3-6 s ("Reject scan trigger
+  since one is already pending"): replaced by the hostapd helper, NM keeps off `ap0`.
+- NixOS restarts wpa_supplicant whenever a Wi-Fi interface appears (udev); that dropped the
+  station and the learned regulatory domain → "Failed to start AP functionality" (5 GHz no-IR).
+  Fixed with a udev override for `ap0` and an explicit regdomain at boot.
+- Upgrade mid-transfer: the drain loop gave up after 16 frames while payload chunks were still
+  arriving over BLE, closing the old channel before the phone's LAST_WRITE → upgrade aborted.
+  Now time-bounded (15 s) and keeps processing payload frames.
+- mDNS and BLE carried different endpoint info (version bits, random vs fixed identity), so a
+  phone rejoining Wi-Fi saw a "renamed" endpoint. Now one generator (utils::endpoint_info).
+- Bluetooth Classic: the advertisement carried a captured phone's MAC; now opt-in
+  (`QSD_BT_CLASSIC=1`) with the real MAC, because RFCOMM still fails ("read failed") and its
+  retries delay BLE by ~5 s.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
    repeated/concurrent connections (first contact must be reliable).
 2. Bluetooth Classic (RFCOMM) first contact, the phone's preferred initial medium.
-3. Bandwidth upgrade hosted by the laptop: WIFI_DIRECT (group owner) and WIFI_HOTSPOT, so the
-   transfer runs at Wi-Fi speed with no shared network.
+3. Bandwidth upgrade hosted by the laptop: WIFI_HOTSPOT (done), WIFI_DIRECT (optional).
 4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case. (done)
 5. App integration: desktop notification when a file arrives, with an "Open folder" action.

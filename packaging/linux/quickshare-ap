@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# quickshare-ap: temporary Wi-Fi hotspot for Quick Share transfers (runs as root, started on
+# demand by the receiver via `systemctl start quickshare-ap`; see quickshare-ap.service).
+#
+# Creates a virtual access-point interface next to the normal Wi-Fi connection (the station keeps
+# working), on the station's channel (most chips can only run AP+STA on one channel), with a random
+# SSID/password, hostapd for the AP and dnsmasq for DHCP. Writes the credentials to
+# $RUNTIME_DIRECTORY/credentials (group-readable) for the receiver, which sends them to the phone
+# over the encrypted Bluetooth channel. Everything is removed when the service stops.
+#
+# Environment: QS_STA (station interface, default: first managed Wi-Fi interface),
+#              QS_AP (AP interface name, default ap0), QS_GROUP (group allowed to read credentials,
+#              default users), QS_SUBNET (default 10.42.0).
+# Needs: iw, iproute2, hostapd, dnsmasq. NetworkManager must leave $QS_AP unmanaged.
+set -euo pipefail
+
+AP=${QS_AP:-ap0}
+GROUP=${QS_GROUP:-users}
+NET=${QS_SUBNET:-10.42.0}
+DIR=${RUNTIME_DIRECTORY:-/run/quickshare}
+mkdir -p "$DIR"
+STA=${QS_STA:-$(iw dev | awk '/Interface/{i=$2} /type managed/{print i; exit}')}
+
+cleanup() {
+  [ -n "${DNSMASQ:-}" ] && kill "$DNSMASQ" 2>/dev/null || true
+  [ -f "$DIR/hostapd.pid" ] && kill "$(cat "$DIR/hostapd.pid")" 2>/dev/null || true
+  iw dev "$AP" del 2>/dev/null || true
+  rm -f "$DIR/credentials" "$DIR/hostapd.conf" "$DIR/hostapd.pid" "$DIR/leases"
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+# Channel of the station connection ("channel 44 (5220 MHz), width: 160 MHz, ...").
+read -r CHAN FREQ < <(iw dev "$STA" info 2>/dev/null |
+  sed -n 's/.*channel \([0-9]*\) (\([0-9]*\) MHz.*/\1 \2/p') || true
+if [ -z "${CHAN:-}" ]; then CHAN=36; FREQ=5180; fi   # not connected: any non-DFS 5 GHz channel
+
+iw dev "$AP" del 2>/dev/null || true
+iw dev "$STA" interface add "$AP" type __ap
+
+# Read a finite amount of randomness (tr < /dev/urandom | head would end in SIGPIPE + pipefail).
+rnd() { head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c "1-$1"; }
+SSID="QuickShare-$(rnd 6)"
+PASS="$(rnd 16)"
+
+{
+  echo "interface=$AP"
+  echo "driver=nl80211"
+  echo "ssid=$SSID"
+  echo "channel=$CHAN"
+  echo "wmm_enabled=1"
+  echo "ieee80211n=1"
+  echo "wpa=2"
+  echo "wpa_key_mgmt=WPA-PSK"
+  echo "rsn_pairwise=CCMP"
+  echo "wpa_passphrase=$PASS"
+  if [ "$FREQ" -ge 5000 ]; then
+    echo "hw_mode=a"
+    echo "ieee80211ac=1"
+    # 40/80 MHz around the primary channel (UNII bands; DFS channels aren't used by an AP here).
+    case $CHAN in
+      36|44|52|60|100|108|116|124|132|140|149|157) echo "ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]" ;;
+      *) echo "ht_capab=[HT40-][SHORT-GI-20][SHORT-GI-40]" ;;
+    esac
+    case $CHAN in
+      36|40|44|48) C=42 ;; 52|56|60|64) C=58 ;; 100|104|108|112) C=106 ;;
+      116|120|124|128) C=122 ;; 132|136|140|144) C=138 ;; 149|153|157|161) C=155 ;; *) C= ;;
+    esac
+    if [ -n "$C" ]; then echo "vht_oper_chwidth=1"; echo "vht_oper_centr_freq_seg0_idx=$C"; fi
+  else
+    echo "hw_mode=g"
+  fi
+} > "$DIR/hostapd.conf"
+
+if ! hostapd -B -P "$DIR/hostapd.pid" "$DIR/hostapd.conf" >/dev/null; then
+  # Fall back to a plain 20 MHz AP (some drivers refuse the wider channel next to the station).
+  sed -i '/^ht_capab=/d; /^vht_/d; /^ieee80211ac=/d' "$DIR/hostapd.conf"
+  hostapd -B -P "$DIR/hostapd.pid" "$DIR/hostapd.conf" >/dev/null
+fi
+
+ip addr add "$NET.1/24" dev "$AP"
+ip link set "$AP" up
+dnsmasq --keep-in-foreground --conf-file=/dev/null --port=0 \
+  --interface="$AP" --bind-interfaces --except-interface=lo \
+  --dhcp-range="$NET.10,$NET.254,255.255.255.0,1h" \
+  --dhcp-leasefile="$DIR/leases" &
+DNSMASQ=$!
+
+umask 027
+printf 'ssid=%s\npassword=%s\nfrequency=%s\ngateway=%s\n' "$SSID" "$PASS" "$FREQ" "$NET.1" \
+  > "$DIR/credentials.tmp"
+chgrp "$GROUP" "$DIR/credentials.tmp" "$DIR"
+chmod 0750 "$DIR"
+mv "$DIR/credentials.tmp" "$DIR/credentials"
+echo "quickshare-ap: $SSID on $AP, channel $CHAN ($FREQ MHz), next to $STA"
+
+wait "$DNSMASQ"

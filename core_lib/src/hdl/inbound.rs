@@ -165,6 +165,27 @@ pub struct InboundRequest<S = TcpStream> {
     /// Hotspot hosted for this transfer (WIFI_HOTSPOT upgrade); removed when the request ends.
     #[cfg(all(feature = "experimental", target_os = "linux"))]
     hotspot: Option<crate::hdl::HotspotGuard>,
+    /// Hotspot being started in the background (takes 0.5-7 s); the handshake keeps running
+    /// meanwhile, and the upgrade is offered once it is up. Blocking here made the phone time out.
+    #[cfg(all(feature = "experimental", target_os = "linux"))]
+    hotspot_task: Option<tokio::task::JoinHandle<Result<crate::hdl::Hotspot, anyhow::Error>>>,
+}
+
+/// A hotspot still being started when the request ends (transfer cancelled before the upgrade)
+/// must not be left running.
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+impl<S> Drop for InboundRequest<S> {
+    fn drop(&mut self) {
+        if let Some(task) = self.hotspot_task.take() {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    if let Ok(Ok(hs)) = task.await {
+                        hs.stop_blocking();
+                    }
+                });
+            }
+        }
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
@@ -188,6 +209,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             peer_ip: None,
             #[cfg(all(feature = "experimental", target_os = "linux"))]
             hotspot: None,
+            #[cfg(all(feature = "experimental", target_os = "linux"))]
+            hotspot_task: None,
         }
     }
 
@@ -198,7 +221,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
 
     /// Consume the "run the bandwidth upgrade now" flag.
     pub fn take_bwu_pending(&mut self) -> bool {
+        #[cfg(all(feature = "experimental", target_os = "linux"))]
+        if self.hotspot_task.as_ref().is_some_and(|t| t.is_finished()) {
+            return true;
+        }
         std::mem::take(&mut self.bwu_pending)
+    }
+
+    /// Upgrade via a hotspot we host (phone not on our network), or via the shared Wi-Fi.
+    /// QSD_BWU=lan|hotspot forces one.
+    #[cfg(all(feature = "experimental", target_os = "linux"))]
+    fn bwu_wants_hotspot(&self) -> bool {
+        match std::env::var("QSD_BWU").unwrap_or_else(|_| "auto".into()).as_str() {
+            "hotspot" => true,
+            "lan" => false,
+            _ => !self.peer_on_our_lan() && crate::hdl::hotspot_available(),
+        }
     }
 
     /// Build a BANDWIDTH_UPGRADE_NEGOTIATION OfflineFrame for the given event.
@@ -479,7 +517,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                 // The encrypted connection is up: flag a Wi-Fi bandwidth upgrade
                 // (BLE sessions only). The BLE session loop runs the handoff.
                 if self.bwu_tcp_port.is_some() {
-                    self.bwu_pending = true;
+                    #[cfg(all(feature = "experimental", target_os = "linux"))]
+                    if self.bwu_wants_hotspot() {
+                        info!("BWU: starting a hotspot in the background");
+                        self.hotspot_task = Some(tokio::spawn(crate::hdl::Hotspot::start()));
+                    } else {
+                        self.bwu_pending = true;
+                    }
+                    #[cfg(not(all(feature = "experimental", target_os = "linux")))]
+                    {
+                        self.bwu_pending = true;
+                    }
                 }
             }
             _ => {
@@ -1735,14 +1783,10 @@ impl InboundRequest<crate::hdl::MigratableStream> {
     pub async fn do_bwu(&mut self) -> Result<(), anyhow::Error> {
         use location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
 
-        // Which path: the shared Wi-Fi (phone on our network) or a hotspot we host.
-        // QSD_BWU=lan|hotspot forces one; QSD_BWU_PORT fixes the listening port (firewalls).
-        let mode = std::env::var("QSD_BWU").unwrap_or_else(|_| "auto".into());
-        let use_hotspot = match mode.as_str() {
-            "hotspot" => true,
-            "lan" => false,
-            _ => !self.peer_on_our_lan() && crate::hdl::hotspot_available(),
-        };
+        // Which path: a hotspot we host (started in the background, see hotspot_task) or the
+        // shared Wi-Fi. QSD_BWU_PORT fixes the listening port (firewalls).
+        let hotspot_task = self.hotspot_task.take();
+        let use_hotspot = hotspot_task.is_some();
         let port: u16 = std::env::var("QSD_BWU_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -1755,10 +1799,14 @@ impl InboundRequest<crate::hdl::MigratableStream> {
                 UpgradePathInfo,
                 upgrade_path_info::{Medium, WifiHotspotCredentials},
             };
-            let hs = match crate::hdl::Hotspot::start().await {
-                Ok(hs) => hs,
-                Err(e) => {
+            let hs = match hotspot_task.expect("checked").await {
+                Ok(Ok(hs)) => hs,
+                Ok(Err(e)) => {
                     warn!("BWU: couldn't start a hotspot ({e}); staying on Bluetooth");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("BWU: hotspot task failed ({e}); staying on Bluetooth");
                     return Ok(());
                 }
             };
@@ -1818,12 +1866,17 @@ impl InboundRequest<crate::hdl::MigratableStream> {
             None,
         ))
         .await?;
-        for _ in 0..16 {
-            let offline = match tokio::time::timeout(
-                Duration::from_secs(5),
-                self.read_encrypted_offline_frame(),
-            )
-            .await
+        // Bounded by time, not by frame count: when the upgrade happens mid-transfer the phone
+        // keeps streaming payload chunks over Bluetooth until its LAST_WRITE, and closing the old
+        // channel before that makes the phone abort the upgrade.
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let left = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                warn!("BWU drain: no SAFE_TO_CLOSE from the phone within 15 s");
+                break;
+            }
+            let offline = match tokio::time::timeout(left, self.read_encrypted_offline_frame()).await
             {
                 Ok(Ok(f)) => f,
                 _ => break,

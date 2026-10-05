@@ -35,6 +35,8 @@ pub struct Hotspot {
     pub frequency: i32,
     iface: String,
     unit: Option<String>,
+    /// Started via the root helper unit (hostapd + dnsmasq), which also removes it.
+    helper: bool,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -57,16 +59,17 @@ fn iface_exists(iface: &str) -> bool {
     std::path::Path::new(&format!("/sys/class/net/{iface}")).exists()
 }
 
-/// Whether a hotspot can be offered on this machine (AP interface present or creatable).
+fn unit_installed(unit: &str) -> bool {
+    ["/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"]
+        .iter()
+        .any(|d| std::path::Path::new(d).join(unit).exists())
+}
+
+/// Whether a hotspot can be offered on this machine (helper unit installed, or an AP interface
+/// that NetworkManager can use).
 pub fn hotspot_available() -> bool {
-    let iface = env_or("QSD_AP_IFACE", "ap0");
-    if iface_exists(&iface) {
-        return true;
-    }
-    let unit = env_or("QSD_AP_UNIT", "quickshare-ap.service");
-    std::path::Path::new("/etc/systemd/system")
-        .join(&unit)
-        .exists()
+    unit_installed(&env_or("QSD_AP_UNIT", "quickshare-ap.service"))
+        || iface_exists(&env_or("QSD_AP_IFACE", "ap0"))
 }
 
 /// The frequency (MHz) of the Wi-Fi network we are connected to as a station, if any
@@ -110,6 +113,56 @@ fn channel_of(mhz: i32) -> Option<(&'static str, i32)> {
 
 impl Hotspot {
     pub async fn start() -> Result<Self, anyhow::Error> {
+        let unit = env_or("QSD_AP_UNIT", "quickshare-ap.service");
+        if unit_installed(&unit) {
+            return Self::start_helper(unit).await;
+        }
+        Self::start_nm().await
+    }
+
+    /// Root helper (packaging/linux/quickshare-ap): starts hostapd + dnsmasq on a virtual AP
+    /// interface and writes `ssid=/password=/frequency=/gateway=` lines to a credentials file.
+    async fn start_helper(unit: String) -> Result<Self, anyhow::Error> {
+        let creds_path = env_or("QSD_AP_CREDENTIALS", "/run/quickshare/credentials");
+        info!("{INNER_NAME}: starting {unit}");
+        run("systemctl", &["start", &unit]).await?;
+        let mut creds = String::new();
+        for _ in 0..150 {
+            if let Ok(c) = std::fs::read_to_string(&creds_path) {
+                if c.contains("password=") {
+                    creds = c;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if creds.is_empty() {
+            let _ = run("systemctl", &["stop", &unit]).await;
+            bail!("{unit} didn't write {creds_path} within 15 s (see journalctl -u {unit})");
+        }
+        let get = |k: &str| {
+            creds
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{k}=")))
+                .map(str::to_string)
+        };
+        let hs = Self {
+            ssid: get("ssid").ok_or_else(|| anyhow!("no ssid in {creds_path}"))?,
+            password: get("password").ok_or_else(|| anyhow!("no password in {creds_path}"))?,
+            gateway: get("gateway")
+                .and_then(|g| g.parse().ok())
+                .unwrap_or(Ipv4Addr::new(10, 42, 0, 1)),
+            frequency: get("frequency").and_then(|f| f.parse().ok()).unwrap_or(-1),
+            iface: env_or("QSD_AP_IFACE", "ap0"),
+            unit: Some(unit),
+            helper: true,
+        };
+        info!("{INNER_NAME}: {} up (gateway {}, {} MHz)", hs.ssid, hs.gateway, hs.frequency);
+        Ok(hs)
+    }
+
+    /// Without the helper: a NetworkManager hotspot (`shared` mode) on an existing AP interface.
+    async fn start_nm() -> Result<Self, anyhow::Error> {
         let iface = env_or("QSD_AP_IFACE", "ap0");
         // Read the station channel first: creating the AP interface can briefly disturb the
         // station connection on some systems.
@@ -205,6 +258,7 @@ impl Hotspot {
             frequency,
             iface,
             unit,
+            helper: false,
         };
         if let Err(e) = run("nmcli", &["--wait", "20", "connection", "up", CONN_NAME]).await {
             hs.stop_blocking();
@@ -228,9 +282,11 @@ impl Hotspot {
     /// Tear the hotspot down (also called from Drop). Synchronous so it works in Drop.
     pub fn stop_blocking(&self) {
         info!("{INNER_NAME}: stopping {}", self.ssid);
-        let _ = std::process::Command::new("nmcli")
-            .args(["connection", "delete", CONN_NAME])
-            .output();
+        if !self.helper {
+            let _ = std::process::Command::new("nmcli")
+                .args(["connection", "delete", CONN_NAME])
+                .output();
+        }
         if let Some(u) = &self.unit {
             let _ = std::process::Command::new("systemctl")
                 .args(["stop", u])
