@@ -2,23 +2,71 @@
 
 **Quick Share (Nearby Share) for Linux that doesn't need both devices on the same Wi-Fi.**
 
-Existing Linux implementations only transfer over a shared local network. Phone-to-phone Quick
-Share doesn't need one: devices find each other over Bluetooth and then move the data over a
-direct Wi-Fi link. This fork adds that path for Linux:
+Existing Linux implementations only transfer over a shared local network, and newer Pixels (with
+the AirDrop-compatible Quick Share) drop off Wi-Fi while looking for devices, so they can't even
+see them. Phone-to-phone Quick Share needs no shared network: devices find each other over
+Bluetooth and move the data over a direct Wi-Fi link. quickshare-direct does that on Linux:
+
+1. **Discovery + first contact over Bluetooth LE** (works with the phone off Wi-Fi).
+2. **Encrypted handshake** (UKEY2, PIN shown on both sides) over that Bluetooth link.
+3. **Upgrade to Wi-Fi speed**: the laptop creates a **Wi-Fi Direct group** next to its normal
+   Wi-Fi connection (which keeps working) and hands the credentials to the phone; or, if the
+   phone is on the same Wi-Fi, the transfer just moves to the local network. A plain hotspot is
+   the fallback.
+4. **Desktop notifications**: Accept/Decline (with the PIN), then "Open folder".
 
 | | Status |
 |---|---|
-| Discovery + transfer over the local network (mDNS/TCP) | from rQuickShare |
-| Discovery by phones that dropped off Wi-Fi (Pixel 10 etc.), transfer over Bluetooth LE ("weave" socket), upgrade to the shared Wi-Fi | from [martinalderson's branch](https://github.com/martinalderson/rquickshare/tree/feat/ble-receiver-connect-back), see [docs/BLE_RECEIVER_DISCOVERY.md](docs/BLE_RECEIVER_DISCOVERY.md) |
-| Upgrade to a **direct Wi-Fi link hosted by the laptop** (Wi-Fi Direct / hotspot), so fast transfers work with no shared network | **in progress** (this fork) |
+| Receive from Android (tested: Pixel 10, Android 16) | works |
+| Phone off Wi-Fi → Wi-Fi Direct (75 MB, ~5 MB/s) | works |
+| Phone on the same Wi-Fi → LAN | works |
+| Bluetooth Classic first contact | experimental (`QSD_BT_CLASSIC=1`) |
+| Sending from Linux | not yet (rQuickShare's sender, unchanged) |
+
+### Install (NixOS)
+
+```nix
+# flake.nix inputs
+quickshare-direct = { url = "github:papshmeare/quickshare-direct"; inputs.nixpkgs.follows = "nixpkgs"; };
+
+# a module
+{ inputs, ... }: {
+  imports = [ inputs.quickshare-direct.nixosModules.default ];
+  services.quickshare-direct = {
+    enable = true;
+    user = "alice";               # whose desktop session runs it
+    wifiInterface = "wlp2s0";     # ip -br link
+  };
+}
+```
+This sets up the receiver (user service in the graphical session), the root helper that creates
+the direct Wi-Fi link on demand (`quickshare-ap.service`, startable by that user via polkit),
+firewall ports, Bluetooth "connectable", and keeps NetworkManager off the link interfaces.
+Set your Wi-Fi regulatory domain (`iw reg set XX`): with the default world domain Linux won't
+start an access point / group owner on 5 GHz.
+
+### Install (other distros)
+
+Build `core_lib` (`cargo build --release --bin quickshare-direct`; needs `protoc`, D-Bus), then:
+- install `packaging/linux/quickshare-ap` (root helper; needs iw, iproute2, hostapd, dnsmasq,
+  busctl, wpa_supplicant with P2P + D-Bus) and `packaging/linux/quickshare-ap.service`, with the
+  polkit rule and NetworkManager `unmanaged-devices` shown in the unit file;
+- open TCP 46257/46258 and run the receiver with `QSD_PORT=46257 QSD_BWU_PORT=46258`;
+- notifications use `notify-send` (libnotify ≥ 0.8) with actions: use a notification daemon that
+  shows action buttons (e.g. swaync, mako with a menu, GNOME, KDE).
+
+### How it works / research notes
+
+[docs/DEV_NOTES.md](docs/DEV_NOTES.md) (findings, phone logs, protocol details) and
+[docs/BLE_RECEIVER_DISCOVERY.md](docs/BLE_RECEIVER_DISCOVERY.md) (the BLE receiver path).
 
 Built on [rQuickShare](https://github.com/Martichou/rquickshare) by Martichou and contributors,
 with Bluetooth work by [nozwock](https://github.com/nozwock) and
 [martinalderson](https://github.com/martinalderson). Protocol reference: Google's
 [Nearby](https://github.com/google/nearby) library (Apache-2.0). License: GPL-3.0, like rQuickShare.
 
-Development: `nix develop` (see `flake.nix`), then in `core_lib`:
-`QSD_DIR=~/Downloads QSD_PORT=46257 QSD_NAME=$(hostname) cargo run --example rx_service`
+Development: `nix develop`, then in `core_lib`: `cargo run --bin quickshare-direct`
+(env: `QSD_DIR`, `QSD_NAME`, `QSD_PORT`, `QSD_BWU_PORT`, `QSD_BWU=lan|hotspot`, `RUST_LOG`).
 
 ---
 
