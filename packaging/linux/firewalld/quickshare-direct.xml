@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Quick Share (quickshare-direct)</short>
+  <description>Incoming Quick Share transfers from Android phones on the same network.</description>
+  <port protocol="tcp" port="46257"/>
+  <port protocol="tcp" port="46258"/>
+</service>

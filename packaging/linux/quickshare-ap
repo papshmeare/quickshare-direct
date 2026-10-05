@@ -13,14 +13,16 @@
 #
 # Environment: QS_MODE (p2p or ap, default p2p),
 #              QS_STA (station interface, default: first managed Wi-Fi interface),
-#              QS_AP (AP interface name, default ap0), QS_GROUP (group allowed to read credentials,
-#              default users), QS_SUBNET (default 10.42.0).
-# Needs: iw, iproute2, hostapd, dnsmasq, busctl (systemd), wpa_supplicant with P2P + D-Bus (p2p).
+#              QS_AP (AP interface name, default ap0), QS_USER (user who may read the credentials;
+#              the template unit quickshare-ap@USER sets it), else QS_GROUP (group allowed to read
+#              them, default users), QS_SUBNET (default 10.42.0).
+# Needs: iw, iproute2, dnsmasq, busctl (systemd), wpa_supplicant with P2P + D-Bus (p2p), hostapd (ap).
 # NetworkManager must leave $QS_AP and p2p-<sta>-* unmanaged.
 set -euo pipefail
 
 AP=${QS_AP:-ap0}
 GROUP=${QS_GROUP:-users}
+[ -n "${QS_USER:-}" ] && GROUP=$(id -gn "$QS_USER")
 NET=${QS_SUBNET:-10.42.0}
 DIR=${RUNTIME_DIRECTORY:-/run/quickshare}
 mkdir -p "$DIR"
@@ -36,19 +38,31 @@ wpas_obj() {
   return 1
 }
 
-# Let the phone reach us on the link interface (its name varies, e.g. p2p-wlp4s0-3). nftables
-# firewalls only; QS_NFT_CHAIN="family table chain" (default: NixOS "inet nixos-fw input-allow").
+# Let the phone reach us on the link interface (its name varies, e.g. p2p-wlp4s0-3): firewalld
+# (trusted zone), ufw (allow in on it), else an nftables rule in QS_NFT_CHAIN="family table chain"
+# (default: NixOS "inet nixos-fw input-allow"; skipped if that chain doesn't exist).
 NFT_CHAIN=${QS_NFT_CHAIN:-inet nixos-fw input-allow}
-nft_allow() {
-  command -v nft >/dev/null || return 0
+fw_allow() {
+  if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --zone=trusted --add-interface="$1" >/dev/null && FW_FIREWALLD=$1
+  elif command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow in on "$1" comment quickshare >/dev/null && FW_UFW=$1
+  elif command -v nft >/dev/null; then
+    # shellcheck disable=SC2086
+    NFT_HANDLE=$(nft --echo --handle insert rule $NFT_CHAIN iifname "$1" accept comment quickshare 2>/dev/null |
+      sed -n 's/.*# handle \([0-9]*\).*/\1/p') || true
+  fi
+}
+fw_cleanup() {
+  [ -n "${FW_FIREWALLD:-}" ] && firewall-cmd --zone=trusted --remove-interface="$FW_FIREWALLD" >/dev/null 2>&1
+  [ -n "${FW_UFW:-}" ] && ufw delete allow in on "$FW_UFW" >/dev/null 2>&1
   # shellcheck disable=SC2086
-  NFT_HANDLE=$(nft --echo --handle insert rule $NFT_CHAIN iifname "$1" accept comment quickshare 2>/dev/null |
-    sed -n 's/.*# handle \([0-9]*\).*/\1/p') || true
+  [ -n "${NFT_HANDLE:-}" ] && nft delete rule $NFT_CHAIN handle "$NFT_HANDLE" 2>/dev/null
+  return 0
 }
 
 cleanup() {
-  # shellcheck disable=SC2086
-  [ -n "${NFT_HANDLE:-}" ] && nft delete rule $NFT_CHAIN handle "$NFT_HANDLE" 2>/dev/null || true
+  fw_cleanup
   [ -n "${DNSMASQ:-}" ] && kill "$DNSMASQ" 2>/dev/null || true
   [ -n "${GOBJ:-}" ] && busctl call $WPAS "$GOBJ" $WPAS.Interface.P2PDevice Disconnect 2>/dev/null || true
   [ -f "$DIR/hostapd.pid" ] && kill "$(cat "$DIR/hostapd.pid")" 2>/dev/null || true
@@ -149,7 +163,7 @@ fi
 
 ip addr add "$NET.1/24" dev "$IF"
 ip link set "$IF" up
-nft_allow "$IF"
+fw_allow "$IF"
 dnsmasq --keep-in-foreground --conf-file=/dev/null --port=0 \
   --interface="$IF" --bind-interfaces --except-interface=lo \
   --dhcp-range="$NET.10,$NET.254,255.255.255.0,1h" \

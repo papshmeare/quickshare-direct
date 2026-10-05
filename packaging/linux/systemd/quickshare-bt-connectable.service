@@ -1,0 +1,14 @@
+# BlueZ keeps the adapter non-connectable unless it is discoverable; phones must be able to
+# connect for Quick Share.
+[Unit]
+Description=Keep the Bluetooth adapter connectable (Quick Share)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 2
+ExecStart=/bin/sh -c 'btmgmt connectable on'
+
+[Install]
+WantedBy=bluetooth.target

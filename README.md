@@ -22,8 +22,48 @@ Bluetooth and move the data over a direct Wi-Fi link. quickshare-direct does tha
 | Phone on the same Wi-Fi → LAN | works |
 | Bluetooth Classic first contact | experimental (`QSD_BT_CLASSIC=1`) |
 | Send to Android → phone's Wi-Fi Direct (300 MB, ~36 MB/s) | works (`quickshare-direct send`, file manager) |
+| Packages: Debian/Ubuntu, Fedora, Arch, generic (x86_64, aarch64) | one-line install, see below |
 
-### Install (NixOS)
+### Install
+
+Debian 12+ / Ubuntu 22.04+ (and Mint, Pop!_OS, ...), Fedora, Arch (and Manjaro, EndeavourOS, ...),
+others via a generic build; x86_64 and aarch64:
+
+```
+curl -fsSL https://raw.githubusercontent.com/papshmeare/quickshare-direct/main/install.sh | sh
+```
+
+It installs the latest [release](https://github.com/papshmeare/quickshare-direct/releases) with
+your package manager (`.deb`, `.rpm`, `.pkg.tar.zst`; dependencies come from your distribution),
+opens the Quick Share ports if firewalld or ufw is active, and starts the receiver. Run the same
+line again to update; `curl -fsSL .../install.sh | sh -s -- --uninstall` removes it. Prefer to
+see what happens first? Download `install.sh` and read it, or install the package from the
+release page by hand (`sudo apt install ./quickshare-direct_amd64.deb`,
+`sudo dnf install ./quickshare-direct.x86_64.rpm`,
+`sudo pacman -U quickshare-direct-x86_64.pkg.tar.zst`).
+
+What gets installed:
+- `quickshare-direct`: the receiver (a user service in every graphical session, with
+  notifications) and the `send` / `devices` commands;
+- two small root helpers, started on demand through systemd (`quickshare-ap@USER` creates the
+  direct Wi-Fi link when receiving, `quickshare-join@USER` joins the phone's when sending), and a
+  polkit rule that lets you start only your own instances;
+- a NetworkManager drop-in that leaves the temporary link interfaces alone, a unit that keeps
+  Bluetooth connectable, firewalld/ufw service definitions, and file manager entries.
+
+Needs: systemd, BlueZ, NetworkManager with wpa_supplicant (the default on these distributions;
+not iwd), and a Wi-Fi card that can run a second interface next to the normal connection (most
+Intel/MediaTek/Qualcomm cards). Notifications need a daemon that shows action buttons (GNOME,
+KDE, swaync, mako, ...). Ubuntu 22.04's older polkit can't let users start the helpers, so there
+only Bluetooth and same-network transfers work. Set your Wi-Fi regulatory domain
+(`sudo iw reg set XX`): with the default world domain Linux won't start a group owner on 5 GHz.
+Settings: `~/.config/quickshare-direct/env` (`QSD_NAME=...`, `QSD_DIR=...`) for the receiver,
+`/etc/default/quickshare-direct` for the helpers.
+
+From source: `make && sudo make install` (needs cargo ≥ 1.85, protoc, libdbus headers), then
+`systemctl --user enable --now quickshare-direct`.
+
+### NixOS
 
 ```nix
 # flake.nix inputs
@@ -60,19 +100,6 @@ over the phone's Wi-Fi Direct group (joined on a second interface, your Wi-Fi st
 In the file manager: Thunar's **Send To → Phone (Quick Share)** (any file), or Open With →
 "Send with Quick Share" (common file types); it reports through notifications.
 
-### Install (other distros)
-
-Build `core_lib` (`cargo build --release --bin quickshare-direct`; needs `protoc`, D-Bus), then:
-- install `packaging/linux/quickshare-ap` (root helper; needs iw, iproute2, hostapd, dnsmasq,
-  busctl, wpa_supplicant with P2P + D-Bus) and `packaging/linux/quickshare-ap.service`, with the
-  polkit rule and NetworkManager `unmanaged-devices` shown in the unit file; for sending also
-  `packaging/linux/quickshare-join` + `.service` (needs busybox for udhcpc) and the
-  `quickshare-direct-send.desktop` entry (Thunar: `quickshare-direct-sendto.desktop` in
-  `share/Thunar/sendto/`);
-- open TCP 46257/46258 and run the receiver with `QSD_PORT=46257 QSD_BWU_PORT=46258`;
-- notifications use `notify-send` (libnotify ≥ 0.8) with actions: use a notification daemon that
-  shows action buttons (e.g. swaync, mako with a menu, GNOME, KDE).
-
 ### How it works / research notes
 
 [docs/DEV_NOTES.md](docs/DEV_NOTES.md) (findings, phone logs, protocol details) and
@@ -82,6 +109,9 @@ Built on [rQuickShare](https://github.com/Martichou/rquickshare) by Martichou an
 with Bluetooth work by [nozwock](https://github.com/nozwock) and
 [martinalderson](https://github.com/martinalderson). Protocol reference: Google's
 [Nearby](https://github.com/google/nearby) library (Apache-2.0). License: GPL-3.0, like rQuickShare.
+
+Releases: CI (`.github/workflows/packages.yml`) builds and install-tests the packages on every
+push; bumping `VERSION` on `main` publishes the release `qsd-v<VERSION>`.
 
 Development: `nix develop`, then in `core_lib`: `cargo run --bin quickshare-direct`
 (env: `QSD_DIR`, `QSD_NAME`, `QSD_PORT`, `QSD_BWU_PORT`, `QSD_BWU=lan|hotspot`, `RUST_LOG`).

@@ -1,0 +1,110 @@
+# Build, test and release the Linux packages.
+#  - every push and pull request: build .deb/.rpm/.pkg.tar.zst/.tar.gz for x86_64 and aarch64,
+#    then install them with install.sh in clean Debian, Ubuntu, Fedora, Arch and openSUSE containers;
+#  - on main, when VERSION names a version without a release yet: publish the GitHub release
+#    qsd-v<VERSION> with those packages (install.sh installs the latest release).
+name: Packages
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'tools/dev/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck -S warning -s sh install.sh packaging/scripts/*.sh
+          shellcheck -S error packaging/linux/quickshare-ap packaging/linux/quickshare-join \
+            packaging/build-packages.sh packaging/ci/*.sh
+      - name: polkit rule
+        run: node packaging/ci/test-polkit-rule.js
+
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, arch: x86_64 }
+          - { runner: ubuntu-22.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core_lib
+      - run: packaging/ci/install-build-deps.sh
+      - run: packaging/build-packages.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:12', 'debian:13', 'ubuntu:22.04', 'ubuntu:24.04', 'fedora:latest', 'archlinux:latest', 'opensuse/tumbleweed']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages-x86_64
+          path: dist
+      - run: packaging/ci/test-install.sh '${{ matrix.image }}' dist
+
+  release:
+    needs: [checks, build, test]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          v=$(tr -d ' \n' < VERSION)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=qsd-v$v" >> "$GITHUB_OUTPUT"
+          if gh release view "qsd-v$v" >/dev/null 2>&1; then
+            echo "qsd-v$v is already released; bump VERSION to publish a new release"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.version.outputs.new == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: dist
+          merge-multiple: true
+      - if: steps.version.outputs.new == 'true'
+        run: |
+          cd dist && sha256sum * > SHA256SUMS && cd ..
+          cat > notes.md <<NOTES
+          Install or update (Debian/Ubuntu, Fedora, Arch and others; x86_64 and aarch64):
+
+          \`\`\`
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+          \`\`\`
+
+          Or download the package for your distribution below. NixOS: use the flake module (see the README).
+          NOTES
+          gh release create '${{ steps.version.outputs.tag }}' dist/* \
+            --target "$GITHUB_SHA" \
+            --title 'quickshare-direct ${{ steps.version.outputs.version }}' \
+            --notes-file notes.md --generate-notes --latest

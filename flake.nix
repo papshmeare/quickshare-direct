@@ -13,7 +13,7 @@
         default = quickshare-direct;
         quickshare-direct = pkgs.rustPlatform.buildRustPackage {
           pname = "quickshare-direct";
-          version = "0.1.0";
+          version = nixpkgs.lib.removeSuffix "\n" (builtins.readFile ./VERSION);
           src = ./core_lib;
           cargoLock = {
             lockFile = ./core_lib/Cargo.lock;

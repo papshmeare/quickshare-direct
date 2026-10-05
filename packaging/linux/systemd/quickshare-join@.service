@@ -1,0 +1,13 @@
+# Joins a phone's Wi-Fi Direct group on a second interface while user %i sends to it
+# (quickshare-join@USER); the credentials come from /run/user/<uid of %i>/quickshare-join.
+[Unit]
+Description=Quick Share: join a phone's Wi-Fi Direct group for %i
+
+[Service]
+Type=simple
+Environment=QS_USER=%i
+EnvironmentFile=-/etc/default/quickshare-direct
+ExecStart=@LIBEXECDIR@/quickshare-join
+ExecStopPost=-/bin/sh -c 'iw dev qsc0 del 2>/dev/null'
+RuntimeDirectory=quickshare-join
+RuntimeDirectoryMode=0750

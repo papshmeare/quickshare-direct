@@ -1,8 +1,8 @@
 // Joining the receiver's Wi-Fi Direct group / hotspot for sending (the receiver hosts the upgrade
 // link and sends us its credentials over the encrypted Bluetooth channel).
 //
-// The join runs in the root helper unit (packaging/linux/quickshare-join, default
-// `quickshare-join.service`) on a second station interface, so the normal Wi-Fi stays up. We hand
+// The join runs in the root helper unit (packaging/linux/quickshare-join: `quickshare-join.service`
+// from the NixOS module or `quickshare-join@USER.service` from the packages) on a second station interface, so the normal Wi-Fi stays up. We hand
 // it the credentials in a 0600 file in our runtime dir and wait for its `joined` file.
 // Environment overrides: QSD_JOIN_UNIT, QSD_JOIN_REQUEST, QSD_JOIN_RESULT.
 
@@ -35,10 +35,7 @@ fn request_path() -> PathBuf {
 
 /// Whether the join helper unit is installed.
 pub fn join_available() -> bool {
-    let unit = env_or("QSD_JOIN_UNIT", "quickshare-join.service");
-    ["/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"]
-        .iter()
-        .any(|d| std::path::Path::new(d).join(&unit).exists())
+    crate::hdl::hotspot::helper_unit("quickshare-join", "QSD_JOIN_UNIT").is_some()
 }
 
 /// A joined network; leaving it (stopping the helper unit) happens on drop.
@@ -68,7 +65,8 @@ pub async fn join_network(
     if [ssid, password, gateway].iter().any(|v| v.contains('\n')) {
         bail!("bad credentials");
     }
-    let unit = env_or("QSD_JOIN_UNIT", "quickshare-join.service");
+    let unit = crate::hdl::hotspot::helper_unit("quickshare-join", "QSD_JOIN_UNIT")
+        .ok_or_else(|| anyhow!("the quickshare-join helper isn't installed"))?;
     let result = PathBuf::from(env_or("QSD_JOIN_RESULT", "/run/quickshare-join/joined"));
     let req = request_path();
     let _ = std::fs::remove_file(&req);

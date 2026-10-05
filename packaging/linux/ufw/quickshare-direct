@@ -1,0 +1,4 @@
+[quickshare-direct]
+title=Quick Share receiver
+description=Incoming Quick Share transfers from Android phones on the same network
+ports=46257,46258/tcp

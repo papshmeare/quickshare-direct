@@ -1,0 +1,17 @@
+# Quick Share receiver in the user's graphical session (notifications need it).
+# Settings (QSD_NAME, QSD_DIR, ...): ~/.config/quickshare-direct/env, one VAR=value per line.
+[Unit]
+Description=Quick Share receiver
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Environment=QSD_PORT=46257
+Environment=QSD_BWU_PORT=46258
+EnvironmentFile=-%h/.config/quickshare-direct/env
+ExecStart=@BINDIR@/quickshare-direct
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

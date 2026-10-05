@@ -24,7 +24,18 @@ measurements, open plan), docs/BLE_RECEIVER_DISCOVERY.md (BLE/weave protocol).
   Accept/Decline with PIN, "Show in folder" via org.freedesktop.FileManager1.ShowItems).
 - `packaging/linux/quickshare-ap`: root helper (Wi-Fi Direct GO via wpa_supplicant D-Bus GroupAdd
   with ht40/vht/he, or hostapd AP; dnsmasq; temporary nft rule).
-- `flake.nix`: package + NixOS module `services.quickshare-direct` + dev shell.
+- `flake.nix`: package + NixOS module `services.quickshare-direct` + dev shell (NixOS uses plain
+  units `quickshare-ap.service`/`quickshare-join.service` for one configured user).
+- Other distros: `Makefile` (`make install DESTDIR= PREFIX=`) installs everything from
+  `packaging/linux/` (template units `quickshare-ap@USER`/`quickshare-join@USER` + polkit rule
+  letting each active local user start their own, NM drop-in, firewalld/ufw, bt-connectable,
+  user unit); `packaging/build-packages.sh` makes .deb/.rpm/.pkg.tar.zst/.tar.gz with fpm;
+  `install.sh` is the one-line installer (picks the package by /etc/os-release).
+  `hotspot::helper_unit` finds either unit flavour at runtime.
+- CI: `.github/workflows/packages.yml` builds (Ubuntu 22.04, x86_64 + aarch64), install-tests
+  in Debian/Ubuntu/Fedora/Arch/openSUSE containers (`packaging/ci/test-install.sh`), and
+  publishes release `qsd-v<VERSION>` when `VERSION` changes on main (upstream rQuickShare tags
+  v0.x already exist, hence the prefix). Bump `VERSION` to release.
 - `tools/dev/`: test harness (USB adb drives the phone's share sheet; see below).
 
 ## Dev loop

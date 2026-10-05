@@ -12,19 +12,21 @@
 # $RUNTIME_DIRECTORY/joined (group-readable) with iface= and ip= once we have an address.
 # Everything is removed when the service stops.
 #
-# Environment: QS_USER (required), QS_STA (station interface, default: first managed interface),
-#              QS_CLI (default qsc0), QS_GROUP (default users), QS_REQUEST.
-# Needs: iw, iproute2, busctl (systemd), busybox (udhcpc), wpa_supplicant with D-Bus.
+# Environment: QS_USER (required; the template unit quickshare-join@USER sets it),
+#              QS_STA (station interface, default: first managed interface), QS_CLI (default qsc0),
+#              QS_REQUEST.
+# Needs: iw, iproute2, busctl (systemd), wpa_supplicant with D-Bus; busybox (udhcpc) optional
+# (without it: a fixed address in the gateway's /24).
 # NetworkManager must leave $QS_CLI unmanaged.
 set -euo pipefail
 
 CLI=${QS_CLI:-qsc0}
-GROUP=${QS_GROUP:-users}
 DIR=${RUNTIME_DIRECTORY:-/run/quickshare-join}
 mkdir -p "$DIR"
 STA=${QS_STA:-$(iw dev | awk '/Interface/{i=$2} /type managed/{print i; exit}')}
 : "${QS_USER:?QS_USER must name the user allowed to request a join}"
 REQ=${QS_REQUEST:-/run/user/$(id -u "$QS_USER")/quickshare-join}
+GROUP=$(id -gn "$QS_USER")
 
 # The request comes from an unprivileged user: a regular file of theirs, no symlink.
 [ -f "$REQ" ] && [ ! -L "$REQ" ] && [ "$(stat -c %U "$REQ")" = "$QS_USER" ] ||
@@ -73,7 +75,7 @@ cat > "$DIR/udhcpc.sh" <<'EOF'
 case "$1" in bound|renew) ip addr flush dev "$interface"; ip addr add "$ip/${mask:-24}" dev "$interface" ;; esac
 EOF
 chmod 0700 "$DIR/udhcpc.sh"
-if busybox udhcpc -i "$CLI" -n -q -t 4 -T 1 -s "$DIR/udhcpc.sh" >/dev/null 2>&1; then
+if command -v busybox >/dev/null && busybox udhcpc -i "$CLI" -n -q -t 4 -T 1 -s "$DIR/udhcpc.sh" >/dev/null 2>&1; then
   :
 elif [ -n "$GW" ]; then
   ip addr add "${GW%.*}.$((100 + RANDOM % 100))/24" dev "$CLI"

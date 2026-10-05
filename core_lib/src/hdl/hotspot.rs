@@ -8,8 +8,9 @@
 // The hotspot runs on a separate *virtual* access-point interface so the laptop's normal Wi-Fi
 // connection stays up. Most Wi-Fi chips only allow the AP on the same channel as the station
 // connection, so we reuse that channel. Requirements (see README):
-//   * an AP interface (default `ap0`), or a systemd unit that creates it (default
-//     `quickshare-ap.service`, started via `systemctl start` - allow it for the user with polkit);
+//   * an AP interface (default `ap0`), or the root helper unit that creates it
+//     (`quickshare-ap.service` from the NixOS module, or our `quickshare-ap@USER.service` from
+//     the packages; started via `systemctl start`, which polkit allows the user);
 //   * NetworkManager (the hotspot is an NM connection in `shared` mode: it assigns 10.42.0.1 to
 //     the interface and runs DHCP for the phone);
 //   * `nmcli` on PATH.
@@ -62,15 +63,47 @@ fn iface_exists(iface: &str) -> bool {
 }
 
 fn unit_installed(unit: &str) -> bool {
-    ["/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"]
-        .iter()
-        .any(|d| std::path::Path::new(d).join(unit).exists())
+    [
+        "/etc/systemd/system",
+        "/run/systemd/system",
+        "/usr/local/lib/systemd/system",
+        "/usr/lib/systemd/system",
+        "/lib/systemd/system",
+    ]
+    .iter()
+    .any(|d| std::path::Path::new(d).join(unit).exists())
+}
+
+fn current_user() -> Option<String> {
+    if let Some(u) = std::env::var("USER").ok().filter(|u| !u.is_empty()) {
+        return Some(u);
+    }
+    let out = std::process::Command::new("id").arg("-un").output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|u| !u.is_empty())
+}
+
+/// The root helper unit `base` ("quickshare-ap", "quickshare-join"): `base.service` as the NixOS
+/// module installs it (for one configured user), or our instance `base@USER.service` of the
+/// template that distribution packages install (polkit lets each user start their own).
+/// `env_key` (QSD_AP_UNIT, QSD_JOIN_UNIT) overrides it.
+pub(crate) fn helper_unit(base: &str, env_key: &str) -> Option<String> {
+    if let Ok(u) = std::env::var(env_key) {
+        return Some(u);
+    }
+    let plain = format!("{base}.service");
+    if unit_installed(&plain) {
+        return Some(plain);
+    }
+    if unit_installed(&format!("{base}@.service")) {
+        return Some(format!("{base}@{}.service", current_user()?));
+    }
+    None
 }
 
 /// Whether a hotspot can be offered on this machine (helper unit installed, or an AP interface
 /// that NetworkManager can use).
 pub fn hotspot_available() -> bool {
-    unit_installed(&env_or("QSD_AP_UNIT", "quickshare-ap.service"))
+    helper_unit("quickshare-ap", "QSD_AP_UNIT").is_some()
         || iface_exists(&env_or("QSD_AP_IFACE", "ap0"))
 }
 
@@ -115,8 +148,7 @@ fn channel_of(mhz: i32) -> Option<(&'static str, i32)> {
 
 impl Hotspot {
     pub async fn start() -> Result<Self, anyhow::Error> {
-        let unit = env_or("QSD_AP_UNIT", "quickshare-ap.service");
-        if unit_installed(&unit) {
+        if let Some(unit) = helper_unit("quickshare-ap", "QSD_AP_UNIT") {
             return Self::start_helper(unit).await;
         }
         Self::start_nm().await
@@ -172,7 +204,8 @@ impl Hotspot {
         let sta = station_frequency().await;
         let mut unit = None;
         if !iface_exists(&iface) {
-            let u = env_or("QSD_AP_UNIT", "quickshare-ap.service");
+            let u = helper_unit("quickshare-ap", "QSD_AP_UNIT")
+                .unwrap_or_else(|| "quickshare-ap.service".to_string());
             info!("{INNER_NAME}: creating {iface} via {u}");
             run("systemctl", &["start", &u]).await?;
             unit = Some(u);
