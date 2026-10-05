@@ -1387,10 +1387,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
     }
 }
 
-/// Upgrade mediums we tell the receiver we support (it picks one and hosts it).
-/// QSD_SEND_MEDIUMS (comma separated: wifi_lan, wifi_direct, wifi_hotspot) overrides the default.
+/// Upgrade mediums we tell the receiver we support (it picks one and hosts it). With the join
+/// helper installed: the receiver's Wi-Fi Direct group / hotspot (works without a shared network
+/// and beats a router path), else the shared Wi-Fi. QSD_SEND_MEDIUMS (comma separated: wifi_lan,
+/// wifi_direct, wifi_hotspot) overrides it.
 fn send_mediums() -> Vec<i32> {
-    let spec = std::env::var("QSD_SEND_MEDIUMS").unwrap_or_else(|_| "wifi_lan".into());
+    #[cfg(all(feature = "experimental", target_os = "linux"))]
+    let default = if crate::hdl::join_available() {
+        "wifi_direct,wifi_hotspot"
+    } else {
+        "wifi_lan"
+    };
+    #[cfg(not(all(feature = "experimental", target_os = "linux")))]
+    let default = "wifi_lan";
+    let spec = std::env::var("QSD_SEND_MEDIUMS").unwrap_or_else(|_| default.into());
     spec.split(',')
         .filter_map(|m| match m.trim() {
             "wifi_lan" => Some(Medium::WifiLan),

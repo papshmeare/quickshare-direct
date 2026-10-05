@@ -164,6 +164,17 @@ with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/ga
   goes over Wi-Fi. 1 MB laptop → Pixel on the same Wi-Fi: upgrade ~2 s after the offer, data
   0.2 s, md5 identical. `tools/dev/qs-receive-mode.sh` puts the phone on the Receive screen.
 
+- **Upgrade, WIFI_DIRECT (done).** With WIFI_DIRECT/WIFI_HOTSPOT in our ConnectionRequest
+  (+ MediumMetadata `supports_5_ghz`, `ap_frequency` = our station's) the phone hosts a Wi-Fi
+  Direct group on our channel (5220 MHz; without the 5 GHz flag it picked 2467) and sends
+  ssid `DIRECT-…`, an 8-char passphrase, gateway 192.168.49.1 and a port. The root helper
+  `quickshare-join` joins it on a second station interface `qsc0` via wpa_supplicant D-Bus
+  (CreateInterface/AddNetwork/SelectNetwork) and gets 192.168.49.x by DHCP; wlp4s0 stays on the
+  home Wi-Fi (the chip allows two managed interfaces on two channels). Credentials go to the
+  helper in a 0600 file in the user's runtime dir. 300 MB laptop → Pixel 10: join 2 s after the
+  offer, data 8.4 s (~36 MB/s, same as receiving), md5 identical. From launch: weave connected
+  3.3 s, PIN prompt 8.6 s (BLE at 20-byte packets), upgraded 16.6 s, done 25 s.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -172,5 +183,6 @@ with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/ga
 3. Bandwidth upgrade hosted by the laptop: WIFI_HOTSPOT (done), WIFI_DIRECT (optional).
 4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case. (done)
 5. App integration: desktop notification when a file arrives, with an "Open folder" action.
-6. Sending: BLE first contact works (spike above). WIFI_LAN upgrade works. Next: no shared Wi-Fi
-   (offer WIFI_DIRECT/HOTSPOT, join the phone's group as a client), larger weave MTU, `quickshare-direct send`.
+6. Sending: BLE first contact + Wi-Fi Direct / LAN upgrade work (`examples/ble_send.rs`). Next:
+   `quickshare-direct send` (CLI / file manager), larger weave MTU (handshake ~5 s at 20-byte
+   packets), text/URL payloads.
