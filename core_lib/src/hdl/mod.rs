@@ -24,6 +24,10 @@ mod gatt_client;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
 pub use gatt_client::*;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
+mod send;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+pub use send::*;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
 mod join;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
 pub use join::*;

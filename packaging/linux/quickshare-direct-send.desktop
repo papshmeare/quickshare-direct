@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Send with Quick Share
+GenericName=Send to phone
+Comment=Send files to a nearby Android phone (Quick Share, phone on its Receive screen)
+Icon=network-wireless
+Exec=quickshare-direct send %F
+Terminal=false
+NoDisplay=true
+MimeType=application/octet-stream;image/*;video/*;audio/*;text/plain;application/pdf;application/zip;
+Categories=Network;FileTransfer;

@@ -12,7 +12,13 @@
 //   QSD_PORT       TCP port for incoming transfers (default: random)
 //   QSD_BWU_PORT   TCP port for the Wi-Fi upgrade (default: random)
 //   QSD_CONSENT_TIMEOUT  seconds to answer the Accept/Decline notification (default 60)
-//   RUST_LOG       log filter (default: info)
+//   RUST_LOG       log filter (default: info; warn for send/devices)
+//
+// Sending: `quickshare-direct send [--to NAME] FILE...` finds a phone in receive mode over
+// Bluetooth (Quick Share open on "Receive", or visible to everyone), shows the PIN, and sends;
+// the transfer moves to the phone's Wi-Fi Direct group when the join helper is installed.
+// Without a terminal (e.g. from a file manager) it reports through notifications.
+// `quickshare-direct devices` lists receivers nearby.
 #[macro_use]
 extern crate log;
 
@@ -170,8 +176,265 @@ async fn copy_to_clipboard(text: &str) {
     }
 }
 
+
+const USAGE: &str = "usage: quickshare-direct                         run the receiver
+       quickshare-direct send [--to NAME] FILE...  send files to a phone in receive mode
+       quickshare-direct devices                   list phones in receive mode nearby";
+
+const NO_RECEIVER_HINT: &str = "No phone in receive mode found. On the phone, open Quick Share and tap Receive \
+(or set Quick Share to be visible to everyone), keep the screen on, and try again.";
+
+/// Send-side reporting: the terminal, or notifications (updated in place) without one.
+struct Reporter {
+    tty: bool,
+    notif_id: Option<String>,
+}
+
+impl Reporter {
+    fn new() -> Self {
+        use std::io::IsTerminal;
+        Self { tty: std::io::stderr().is_terminal(), notif_id: None }
+    }
+
+    /// A status line (on a terminal it replaces the previous `progress` line).
+    async fn status(&mut self, summary: &str, body: &str) {
+        if self.tty {
+            eprintln!("\r\x1b[K{summary}{}", if body.is_empty() { String::new() } else { format!(": {body}") });
+            return;
+        }
+        let mut cmd = Command::new("notify-send");
+        cmd.args(["--app-name=Quick Share", "--icon=network-wireless", "--print-id"]);
+        if let Some(id) = &self.notif_id {
+            cmd.arg(format!("--replace-id={id}"));
+        }
+        cmd.arg(summary).arg(body);
+        if let Ok(out) = cmd.output().await {
+            let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !id.is_empty() {
+                self.notif_id = Some(id);
+            }
+        }
+    }
+
+    fn progress(&self, done: u64, total: u64, rate: f64) {
+        if self.tty && total > 0 {
+            eprint!(
+                "\r\x1b[K{:>3}%  {} of {}  {}/s",
+                done * 100 / total,
+                human_size(done),
+                human_size(total),
+                human_size(rate as u64)
+            );
+        }
+    }
+}
+
+async fn ble_adapter() -> Result<bluer::Adapter, anyhow::Error> {
+    let session = bluer::Session::new().await?;
+    let adapter = session.default_adapter().await?;
+    if !adapter.is_powered().await? {
+        anyhow::bail!("Bluetooth is off (turn it on and try again)");
+    }
+    Ok(adapter)
+}
+
+fn receiver_label(r: &rqs_lib::hdl::BleReceiver) -> String {
+    r.name.clone().unwrap_or_else(|| format!("unnamed device {}", String::from_utf8_lossy(&r.endpoint_id)))
+}
+
+async fn cmd_devices() -> Result<i32, anyhow::Error> {
+    let adapter = ble_adapter().await?;
+    eprintln!("Scanning for 8 s...");
+    let found = rqs_lib::hdl::discover_receivers(
+        &adapter,
+        None,
+        std::time::Duration::from_secs(8),
+        std::time::Duration::from_secs(8),
+    )
+    .await?;
+    if found.is_empty() {
+        eprintln!("{NO_RECEIVER_HINT}");
+        return Ok(1);
+    }
+    for r in &found {
+        println!("{}", receiver_label(r));
+    }
+    Ok(0)
+}
+
+async fn cmd_send(args: &[String]) -> Result<i32, anyhow::Error> {
+    let mut to: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--to" => to = Some(it.next().ok_or_else(|| anyhow::anyhow!("--to needs a name"))?.clone()),
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(0);
+            }
+            "--" => files.extend(it.by_ref().cloned()),
+            f if f.starts_with("--to=") => to = Some(f["--to=".len()..].to_string()),
+            f if f.starts_with('-') && f.len() > 1 => anyhow::bail!("unknown option {f}\n{USAGE}"),
+            f => files.push(f.to_string()),
+        }
+    }
+    if files.is_empty() {
+        anyhow::bail!("no files given\n{USAGE}");
+    }
+    let mut paths = Vec::new();
+    for f in &files {
+        let p = std::fs::canonicalize(f).map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
+        if !p.is_file() {
+            anyhow::bail!("{f}: not a regular file (folders aren't supported)");
+        }
+        paths.push(p.to_string_lossy().into_owned());
+    }
+    let total_size: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    let what = if paths.len() == 1 {
+        let n = std::path::Path::new(&paths[0]).file_name().map(|n| n.to_string_lossy().into_owned());
+        format!("{} ({})", n.unwrap_or_default(), human_size(total_size))
+    } else {
+        format!("{} files ({})", paths.len(), human_size(total_size))
+    };
+
+    rqs_lib::set_device_name(&device_name());
+    let adapter = ble_adapter().await?;
+    let mut rep = Reporter::new();
+    rep.status("Quick Share", &format!("Looking for {}...", to.as_deref().unwrap_or("a phone in receive mode"))).await;
+    let found = rqs_lib::hdl::discover_receivers(
+        &adapter,
+        to.as_deref(),
+        std::time::Duration::from_secs(30),
+        if to.is_some() { std::time::Duration::ZERO } else { std::time::Duration::from_secs(3) },
+    )
+    .await?;
+    let receiver = match found.as_slice() {
+        [] => {
+            rep.status("Quick Share: nothing sent", NO_RECEIVER_HINT).await;
+            return Ok(1);
+        }
+        [r] => r.clone(),
+        many => {
+            let names: Vec<String> = many.iter().map(receiver_label).collect();
+            rep.status(
+                "Quick Share: several phones nearby",
+                &format!("pick one with --to NAME: {}", names.join(", ")),
+            )
+            .await;
+            return Ok(2);
+        }
+    };
+    let target = receiver_label(&receiver);
+    rep.status(&format!("Sending {what} to {target}"), "connecting...").await;
+
+    let (sender, mut events) = tokio::sync::broadcast::channel::<ChannelMessage>(256);
+    let ctk = tokio_util::sync::CancellationToken::new();
+    {
+        let ctk = ctk.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                ctk.cancel();
+            }
+        });
+    }
+    let send = rqs_lib::hdl::send_files_ble(&adapter, &receiver, paths, "send".into(), sender, ctk);
+    tokio::pin!(send);
+
+    let mut shown_pin = false;
+    let mut started: Option<std::time::Instant> = None;
+    let mut last_progress = std::time::Instant::now();
+    let result = loop {
+        tokio::select! {
+            r = &mut send => break r,
+            ev = events.recv() => {
+                let Ok(cm) = ev else { continue };
+                let Message::Client(mc) = cm.msg else { continue };
+                let Some(meta) = mc.metadata else { continue };
+                match mc.state {
+                    Some(TransferState::SentIntroduction) if !shown_pin => {
+                        shown_pin = true;
+                        let pin = meta.pin_code.map(|p| format!(" (PIN {p})")).unwrap_or_default();
+                        rep.status(&format!("Sending {what} to {target}"), &format!("accept on the phone{pin}")).await;
+                    }
+                    Some(TransferState::SendingFiles) => {
+                        let t0 = *started.get_or_insert_with(std::time::Instant::now);
+                        if last_progress.elapsed().as_millis() >= 200 {
+                            last_progress = std::time::Instant::now();
+                            let rate = meta.ack_bytes as f64 / t0.elapsed().as_secs_f64().max(0.001);
+                            rep.progress(meta.ack_bytes, meta.total_bytes, rate);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
+    let secs = started.map(|t| t.elapsed().as_secs_f64());
+    match result {
+        Ok(TransferState::Finished) => {
+            let rate = secs.map(|s| format!(" in {s:.1} s ({}/s)", human_size((total_size as f64 / s.max(0.001)) as u64))).unwrap_or_default();
+            rep.status(&format!("Sent {what} to {target}"), &rate.trim_start().to_string()).await;
+            Ok(0)
+        }
+        Ok(TransferState::Rejected) => {
+            rep.status(&format!("{target} declined"), &what).await;
+            Ok(1)
+        }
+        Ok(TransferState::Cancelled) => {
+            rep.status("Quick Share: cancelled", &what).await;
+            Ok(130)
+        }
+        Ok(state) => {
+            rep.status(&format!("Couldn't send to {target}"), &format!("connection ended ({state:?})")).await;
+            Ok(1)
+        }
+        Err(e) => {
+            rep.status(&format!("Couldn't send to {target}"), &e.to_string()).await;
+            Ok(1)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(cmd) = args.first().map(String::as_str) {
+        let log = || {
+            tracing_subscriber::fmt()
+                .with_env_filter(if std::env::var("RUST_LOG").is_ok() {
+                    EnvFilter::builder().from_env_lossy()
+                } else {
+                    EnvFilter::builder().parse_lossy("warn,bluez_async=error,btleplug=error")
+                })
+                .with_writer(std::io::stderr)
+                .init();
+        };
+        let code = match cmd {
+            "send" => {
+                log();
+                cmd_send(&args[1..]).await
+            }
+            "devices" => {
+                log();
+                cmd_devices().await
+            }
+            "-h" | "--help" | "help" => {
+                println!("{USAGE}");
+                Ok(0)
+            }
+            other => {
+                eprintln!("unknown command {other}\n{USAGE}");
+                Ok(2)
+            }
+        };
+        let code = code.unwrap_or_else(|e| {
+            eprintln!("quickshare-direct: {e}");
+            1
+        });
+        std::process::exit(code);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(if std::env::var("RUST_LOG").is_ok() {
             EnvFilter::builder().from_env_lossy()

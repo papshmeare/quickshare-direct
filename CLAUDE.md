@@ -37,8 +37,15 @@ measurements, open plan), docs/BLE_RECEIVER_DISCOVERY.md (BLE/weave protocol).
   connecting tile cancels it). Accept prompts with `swaync-client -a 0`. Phone logs:
   `$QSD_TMP/phone-logcat.txt` (tags NearbyConnections/NearbyMediums/NearbySharing).
   Remove test images from the phone afterwards (MediaStore delete).
+- Sending tests: `tools/dev/qs-receive-mode.sh` puts the phone on Quick Share's Receive screen,
+  `tools/dev/qs-accept.sh` taps Accept (`QS_BUTTON=Decline`), then
+  `core_lib/target/release/quickshare-direct send FILE...` (run it under `script -qec` to get the
+  terminal output; without a tty it reports through notifications). Files land in the phone's
+  `Download/Quick Share/`.
 
 ## State (2026-10-05)
 Works end to end with a Pixel 10: prompt 0.4 s after the PIN, Wi-Fi Direct VHT80 at 33-37 MB/s
-(300 MB), files land in ~/Downloads, "Show in folder" selects them. Open items: see the Plan in
-docs/DEV_NOTES.md (Bluetooth Classic, phone join ~4 s, sending from Linux, upstreaming).
+(300 MB), files land in ~/Downloads, "Show in folder" selects them. Sending works too
+(`quickshare-direct send`, phone on its Receive screen → BLE → phone's Wi-Fi Direct group joined by
+`quickshare-join` on qsc0, ~36 MB/s). Open items: see the Plan in docs/DEV_NOTES.md (Bluetooth
+Classic, phone join ~4 s, weave MTU for sending, upstreaming).

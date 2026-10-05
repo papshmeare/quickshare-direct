@@ -126,7 +126,7 @@ AP only). Wi-Fi power save on the station made no measurable difference.
 ## 2026-10-05: sending from Linux over BLE (spike)
 
 First file sent laptop → Pixel 10 with no shared Wi-Fi (7.9 kB PNG, md5 identical, phone prompt
-with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/gatt_client.rs`.
+with matching PIN), using `hdl/gatt_client.rs` (now `quickshare-direct send`, `hdl/send.rs`).
 
 - **Discovery.** With the Quick Share Receive screen open ("Temporarily visible to everyone") the
   phone advertises 0xFEF3 service data in the same format as our receiver (endpoint id, plaintext
@@ -175,6 +175,15 @@ with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/ga
   offer, data 8.4 s (~36 MB/s, same as receiving), md5 identical. From launch: weave connected
   3.3 s, PIN prompt 8.6 s (BLE at 20-byte packets), upgraded 16.6 s, done 25 s.
 
+- **CLI (done).** `quickshare-direct send [--to NAME] FILE...` / `devices`, and a
+  "Send with Quick Share" desktop entry (Open With); terminal progress, or one notification
+  updated in place without a terminal. Exit codes: 0 sent, 1 declined/failed, 2 several phones
+  (use --to), 130 cancelled. The phone's upgrade offer sometimes arrives *after* its Accept and
+  outbound didn't read frames while streaming, so the files went over BLE (~200 KB/s) until the
+  phone dropped the link: the send driver now holds the files after Accept for up to 10 s until
+  the upgrade is done. 70 MB in two files: 4.1 s over Wi-Fi Direct, md5 identical. A phone
+  Decline now ends as Rejected (was Disconnected).
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -183,6 +192,6 @@ with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/ga
 3. Bandwidth upgrade hosted by the laptop: WIFI_HOTSPOT (done), WIFI_DIRECT (optional).
 4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case. (done)
 5. App integration: desktop notification when a file arrives, with an "Open folder" action.
-6. Sending: BLE first contact + Wi-Fi Direct / LAN upgrade work (`examples/ble_send.rs`). Next:
-   `quickshare-direct send` (CLI / file manager), larger weave MTU (handshake ~5 s at 20-byte
-   packets), text/URL payloads.
+6. Sending works (`quickshare-direct send`, file manager entry). Next: larger weave MTU
+   (handshake ~5 s at 20-byte packets), text/URL payloads, folders, waking a phone that isn't on
+   its Receive screen (the "device nearby is sharing" beacon).

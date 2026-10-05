@@ -21,7 +21,7 @@ Bluetooth and move the data over a direct Wi-Fi link. quickshare-direct does tha
 | Phone off Wi-Fi → Wi-Fi Direct (75 MB, ~5 MB/s) | works |
 | Phone on the same Wi-Fi → LAN | works |
 | Bluetooth Classic first contact | experimental (`QSD_BT_CLASSIC=1`) |
-| Sending from Linux → phone's Wi-Fi Direct (300 MB, ~36 MB/s) | works in a test harness (`examples/ble_send.rs`); no CLI yet |
+| Send to Android → phone's Wi-Fi Direct (300 MB, ~36 MB/s) | works (`quickshare-direct send`, file manager) |
 
 ### Install (NixOS)
 
@@ -41,16 +41,32 @@ quickshare-direct = { url = "github:papshmeare/quickshare-direct"; inputs.nixpkg
 ```
 This sets up the receiver (user service in the graphical session), the root helper that creates
 the direct Wi-Fi link on demand (`quickshare-ap.service`, startable by that user via polkit),
+the helper that joins a phone's Wi-Fi Direct group when sending (`quickshare-join.service`),
 firewall ports, Bluetooth "connectable", and keeps NetworkManager off the link interfaces.
 Set your Wi-Fi regulatory domain (`iw reg set XX`): with the default world domain Linux won't
 start an access point / group owner on 5 GHz.
+
+### Sending
+
+On the phone, open Quick Share and tap **Receive** (or make it visible to everyone), then:
+
+```
+quickshare-direct send photo.jpg notes.pdf      # to the one phone in receive mode nearby
+quickshare-direct send --to Pixel video.mp4     # pick by name when several are around
+quickshare-direct devices                       # list phones in receive mode
+```
+It finds the phone over Bluetooth, shows the PIN, and once you accept on the phone the files go
+over the phone's Wi-Fi Direct group (joined on a second interface, your Wi-Fi stays connected).
+In the file manager: Open With → "Send with Quick Share" (reports through notifications).
 
 ### Install (other distros)
 
 Build `core_lib` (`cargo build --release --bin quickshare-direct`; needs `protoc`, D-Bus), then:
 - install `packaging/linux/quickshare-ap` (root helper; needs iw, iproute2, hostapd, dnsmasq,
   busctl, wpa_supplicant with P2P + D-Bus) and `packaging/linux/quickshare-ap.service`, with the
-  polkit rule and NetworkManager `unmanaged-devices` shown in the unit file;
+  polkit rule and NetworkManager `unmanaged-devices` shown in the unit file; for sending also
+  `packaging/linux/quickshare-join` + `.service` (needs busybox for udhcpc) and the
+  `quickshare-direct-send.desktop` entry;
 - open TCP 46257/46258 and run the receiver with `QSD_PORT=46257 QSD_BWU_PORT=46258`;
 - notifications use `notify-send` (libnotify ≥ 0.8) with actions: use a notification daemon that
   shows action buttons (e.g. swaync, mako with a menu, GNOME, KDE).

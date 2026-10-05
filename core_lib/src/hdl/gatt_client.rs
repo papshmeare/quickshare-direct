@@ -79,33 +79,65 @@ pub async fn discover_receiver(
     name: Option<&str>,
     timeout: Duration,
 ) -> Result<BleReceiver, anyhow::Error> {
+    discover_receivers(adapter, name, timeout, Duration::ZERO)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no Quick Share receiver found over BLE"))
+}
+
+/// Scans for receivers matching `name` (case-insensitive substring, any if None): waits up to
+/// `timeout` for the first one, then `settle` longer to collect others. Strongest signal first;
+/// one entry per endpoint (a phone's random address rotates). Empty if none showed up.
+pub async fn discover_receivers(
+    adapter: &Adapter,
+    name: Option<&str>,
+    timeout: Duration,
+    settle: Duration,
+) -> Result<Vec<BleReceiver>, anyhow::Error> {
     let svc = Uuid::from_u16(QS_GATT_SERVICE);
     // Keep discovery running while we poll; BlueZ's cache also lists devices from earlier
     // scans (whose random addresses may be gone), so only take ones seen now (RSSI set).
     let _events = adapter.discover_devices().await?;
-    let check = async |addr: Address| -> Option<BleReceiver> {
+    let check = async |addr: Address| -> Option<(BleReceiver, i16)> {
         let dev = adapter.device(addr).ok()?;
-        dev.rssi().await.ok()??;
+        let rssi = dev.rssi().await.ok()??;
         let sd: HashMap<Uuid, Vec<u8>> = dev.service_data().await.ok()??;
         let r = parse_receiver_advertisement(addr, sd.get(&svc)?)?;
         match (name, &r.name) {
-            (None, _) => Some(r),
-            (Some(want), Some(n)) if n.to_lowercase().contains(&want.to_lowercase()) => Some(r),
+            (None, _) => Some((r, rssi)),
+            (Some(want), Some(n)) if n.to_lowercase().contains(&want.to_lowercase()) => {
+                Some((r, rssi))
+            }
             _ => None,
         }
     };
-    tokio::time::timeout(timeout, async {
-        loop {
-            for addr in adapter.device_addresses().await? {
-                if let Some(r) = check(addr).await {
-                    return Ok::<_, anyhow::Error>(r);
+    let start = tokio::time::Instant::now();
+    let mut first_seen: Option<tokio::time::Instant> = None;
+    let mut found: HashMap<[u8; 4], (BleReceiver, i16)> = HashMap::new();
+    loop {
+        for addr in adapter.device_addresses().await? {
+            if let Some((r, rssi)) = check(addr).await {
+                first_seen.get_or_insert_with(tokio::time::Instant::now);
+                match found.get(&r.endpoint_id) {
+                    Some((_, best)) if *best >= rssi => {}
+                    _ => {
+                        found.insert(r.endpoint_id, (r, rssi));
+                    }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
         }
-    })
-    .await
-    .map_err(|_| anyhow!("no Quick Share receiver found over BLE"))?
+        let now = tokio::time::Instant::now();
+        match first_seen {
+            Some(t) if now >= t + settle => break,
+            None if now >= start + timeout => break,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let mut v: Vec<_> = found.into_values().collect();
+    v.sort_by_key(|(_, rssi)| -rssi);
+    Ok(v.into_iter().map(|(r, _)| r).collect())
 }
 
 async fn find_weave_chars(dev: &Device) -> Result<(Characteristic, Characteristic), anyhow::Error> {

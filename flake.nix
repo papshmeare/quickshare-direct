@@ -27,6 +27,11 @@
             install -Dm755 ${./packaging/linux/quickshare-ap} $out/libexec/quickshare-ap
             install -Dm755 ${./packaging/linux/quickshare-join} $out/libexec/quickshare-join
             patchShebangs $out/libexec
+            # "Send with Quick Share" in the file manager's Open With menu.
+            install -Dm644 ${./packaging/linux/quickshare-direct-send.desktop} \
+              $out/share/applications/quickshare-direct-send.desktop
+            substituteInPlace $out/share/applications/quickshare-direct-send.desktop \
+              --replace-fail "Exec=quickshare-direct" "Exec=$out/bin/quickshare-direct"
           '';
           meta = {
             description = "Quick Share receiver for Linux: Bluetooth first contact, Wi-Fi Direct/hotspot/LAN transfer";
@@ -81,6 +86,8 @@
           };
 
           config = lib.mkIf cfg.enable {
+            # `quickshare-direct send FILE...` and the file manager's "Send with Quick Share".
+            environment.systemPackages = [ pkg ];
             # Root helper: creates/removes the direct Wi-Fi link on demand.
             systemd.services.quickshare-ap = {
               description = "Temporary direct Wi-Fi link for Quick Share transfers";

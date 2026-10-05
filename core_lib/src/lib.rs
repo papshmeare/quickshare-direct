@@ -52,6 +52,11 @@ static CUSTOM_DOWNLOAD: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new
 static DEVICE_NAME: Lazy<RwLock<String>> =
     Lazy::new(|| RwLock::new(sys_metrics::host::get_hostname().unwrap_or("Unknown device".into())));
 
+/// Name shown to the other device (for sending without an `RQS` instance).
+pub fn set_device_name(name: &str) {
+    *DEVICE_NAME.write().unwrap() = name.to_string();
+}
+
 #[derive(Debug)]
 pub struct RQS {
     tracker: Option<TaskTracker>,
