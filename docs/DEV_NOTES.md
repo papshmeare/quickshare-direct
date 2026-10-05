@@ -156,6 +156,14 @@ with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/ga
   went over BLE. Without shared Wi-Fi the phone has to host (WIFI_DIRECT / WIFI_HOTSPOT
   credentials) and the laptop has to join as a client: the reverse of the receive side.
 
+- **Upgrade, WIFI_LAN (done).** Outbound now follows the receiver's offer as the responder
+  (`OutboundRequest::do_bwu`): TCP connect to the offered ip:port, plaintext CLIENT_INTRODUCTION
+  with our endpoint id, read the ACK, encrypted LAST_WRITE on BLE, answer the phone's LAST_WRITE
+  with SAFE_TO_CLOSE, stop at its SAFE_TO_CLOSE, plaintext DISCONNECTION, swap the socket. Frames
+  that arrive during the drain (the consent response) are processed after the swap, so the file
+  goes over Wi-Fi. 1 MB laptop → Pixel on the same Wi-Fi: upgrade ~2 s after the offer, data
+  0.2 s, md5 identical. `tools/dev/qs-receive-mode.sh` puts the phone on the Receive screen.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -164,5 +172,5 @@ with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/ga
 3. Bandwidth upgrade hosted by the laptop: WIFI_HOTSPOT (done), WIFI_DIRECT (optional).
 4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case. (done)
 5. App integration: desktop notification when a file arrives, with an "Open folder" action.
-6. Sending: BLE first contact works (spike above). Next: handle the phone's upgrade offer
-   (join its Wi-Fi Direct group / hotspot as a client), larger weave MTU, `quickshare-direct send`.
+6. Sending: BLE first contact works (spike above). WIFI_LAN upgrade works. Next: no shared Wi-Fi
+   (offer WIFI_DIRECT/HOTSPOT, join the phone's group as a client), larger weave MTU, `quickshare-direct send`.

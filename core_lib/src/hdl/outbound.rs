@@ -24,6 +24,9 @@ use super::info::{InternalFileInfo, TransferMetadata, TransferPayload, TransferP
 use super::{InnerState, TransferState};
 use crate::channel::{self, ChannelMessage, MessageClient, TransferAction, TransferKind};
 use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium;
+use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+    EventType, UpgradePathInfo,
+};
 use crate::location_nearby_connections::connection_response_frame::ResponseStatus;
 use crate::location_nearby_connections::payload_transfer_frame::{
     PacketType, PayloadChunk, PayloadHeader, payload_header,
@@ -66,6 +69,8 @@ pub struct OutboundRequest<S = TcpStream> {
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
+    /// Upgrade path offered by the receiver, not yet acted on (see `take_bwu_offer`).
+    bwu_offer: Option<UpgradePathInfo>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
@@ -104,6 +109,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
             sender,
             receiver,
             payload,
+            bwu_offer: None,
         }
     }
 
@@ -401,10 +407,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
         Ok(())
     }
 
-    async fn decrypt_and_process_secure_message(
+    async fn decrypt_secure_message(
         &mut self,
         smsg: &SecureMessage,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<OfflineFrame, anyhow::Error> {
         let mut hmac = HmacSha256::new_from_slice(self.state.recv_hmac_key.as_ref().unwrap())?;
         hmac.update(&smsg.header_and_body);
         if !hmac
@@ -436,7 +442,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
             ));
         }
 
-        let offline = location_nearby_connections::OfflineFrame::decode(d2d_msg.message())?;
+        Ok(location_nearby_connections::OfflineFrame::decode(
+            d2d_msg.message(),
+        )?)
+    }
+
+    async fn decrypt_and_process_secure_message(
+        &mut self,
+        smsg: &SecureMessage,
+    ) -> Result<(), anyhow::Error> {
+        let offline = self.decrypt_secure_message(smsg).await?;
+        self.process_offline_frame(offline).await
+    }
+
+    async fn process_offline_frame(
+        &mut self,
+        offline: OfflineFrame,
+    ) -> Result<(), anyhow::Error> {
         let v1_frame = offline
             .v1
             .as_ref()
@@ -516,6 +538,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
             location_nearby_connections::v1_frame::FrameType::KeepAlive => {
                 trace!("Sending keepalive");
                 self.send_keepalive(true).await?;
+            }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation => {
+                // The receiver initiates the upgrade; remember its offer for do_bwu().
+                let bwu = v1_frame.bandwidth_upgrade_negotiation.as_ref();
+                match bwu.map(|b| b.event_type()) {
+                    Some(EventType::UpgradePathAvailable) => {
+                        let info = bwu.and_then(|b| b.upgrade_path_info.clone());
+                        info!(
+                            "BWU: receiver offers {:?}",
+                            info.as_ref().map(|i| i.medium())
+                        );
+                        self.bwu_offer = info;
+                    }
+                    other => debug!("BWU: ignoring {other:?} outside an upgrade"),
+                }
             }
             _ => {
                 error!("Unhandled offline frame encrypted: {:?}", offline);
@@ -1333,4 +1370,184 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
         // get spammed by new requests. Currently set to 10 micro secs.
         tokio::time::sleep(SANITY_DURATION).await;
     }
+}
+
+fn bwu_frame(event_type: EventType) -> OfflineFrame {
+    location_nearby_connections::OfflineFrame {
+        version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+        v1: Some(location_nearby_connections::V1Frame {
+            r#type: Some(
+                location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                    .into(),
+            ),
+            bandwidth_upgrade_negotiation: Some(
+                location_nearby_connections::BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(event_type.into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }),
+    }
+}
+
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+impl OutboundRequest<crate::hdl::MigratableStream> {
+    /// The receiver's pending upgrade offer, if any (the receiver is the BWU initiator).
+    pub fn take_bwu_offer(&mut self) -> Option<UpgradePathInfo> {
+        self.bwu_offer.take()
+    }
+
+    /// Follow the receiver's upgrade offer as the responder: connect to the new medium, send the
+    /// plaintext CLIENT_INTRODUCTION (and read the ACK), drain the prior channel with
+    /// LAST_WRITE / SAFE_TO_CLOSE, then swap the socket. Keys and sequence numbers carry over.
+    /// On failure the session stays on the prior channel.
+    pub async fn do_bwu(&mut self, info: UpgradePathInfo) -> Result<(), anyhow::Error> {
+        use location_nearby_connections::bandwidth_upgrade_negotiation_frame::ClientIntroduction;
+
+        let addr = match info.medium() {
+            Medium::WifiLan => {
+                let s = info
+                    .wifi_lan_socket
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("WIFI_LAN offer without a socket"))?;
+                let ip: [u8; 4] = s
+                    .ip_address()
+                    .try_into()
+                    .map_err(|_| anyhow!("bad WIFI_LAN address"))?;
+                std::net::SocketAddr::from((ip, s.wifi_port() as u16))
+            }
+            other => {
+                warn!("BWU: {other:?} not supported for sending yet; staying on the prior channel");
+                return Ok(());
+            }
+        };
+        info!("BWU: connecting to {addr}");
+        let mut tcp = match tokio::time::timeout(
+            Duration::from_secs(10),
+            TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            r => {
+                warn!("BWU: can't reach {addr} ({r:?}); staying on the prior channel");
+                return Ok(());
+            }
+        };
+        tcp.set_nodelay(true)?;
+
+        // Plaintext CLIENT_INTRODUCTION on the new socket (bypasses the cipher and seq counters).
+        let mut intro = bwu_frame(EventType::ClientIntroduction);
+        if let Some(b) = intro
+            .v1
+            .as_mut()
+            .and_then(|v| v.bandwidth_upgrade_negotiation.as_mut())
+        {
+            b.client_introduction = Some(ClientIntroduction {
+                endpoint_id: Some(String::from_utf8_lossy(&self.endpoint_id).into_owned()),
+                supports_disabling_encryption: Some(false),
+                ..Default::default()
+            });
+        }
+        write_frame_on(&mut tcp, &intro.encode_to_vec()).await?;
+        if info.supports_client_introduction_ack() {
+            let ack = tokio::time::timeout(Duration::from_secs(10), read_frame_on(&mut tcp))
+                .await
+                .map_err(|_| anyhow!("no CLIENT_INTRODUCTION_ACK"))??;
+            let ack = OfflineFrame::decode(&*ack)?;
+            debug!(
+                "BWU: ack {:?}",
+                ack.v1
+                    .as_ref()
+                    .and_then(|v| v.bandwidth_upgrade_negotiation.as_ref())
+                    .map(|b| b.event_type())
+            );
+        }
+
+        // Drain the prior channel. Non-BWU frames that arrive meanwhile (e.g. the consent
+        // response) are processed after the swap, so file data goes over the new socket.
+        self.encrypt_and_send(&bwu_frame(EventType::LastWriteToPriorChannel))
+            .await?;
+        let mut deferred: Vec<OfflineFrame> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let frame = match tokio::time::timeout(left, read_frame_on(&mut self.socket)).await {
+                Ok(Ok(f)) => f,
+                Ok(Err(e)) => {
+                    debug!("BWU drain: prior channel ended: {e}");
+                    break;
+                }
+                Err(_) => {
+                    warn!("BWU drain: no SAFE_TO_CLOSE within 15 s");
+                    break;
+                }
+            };
+            let offline = self
+                .decrypt_secure_message(&SecureMessage::decode(&*frame)?)
+                .await?;
+            let event = offline
+                .v1
+                .as_ref()
+                .and_then(|v| v.bandwidth_upgrade_negotiation.as_ref())
+                .map(|b| b.event_type());
+            match event {
+                Some(EventType::LastWriteToPriorChannel) => {
+                    debug!("BWU drain: peer LAST_WRITE -> SAFE_TO_CLOSE");
+                    self.encrypt_and_send(&bwu_frame(EventType::SafeToClosePriorChannel))
+                        .await?;
+                }
+                Some(EventType::SafeToClosePriorChannel) => {
+                    debug!("BWU drain: peer SAFE_TO_CLOSE");
+                    break;
+                }
+                Some(other) => debug!("BWU drain: event {other:?}"),
+                None => deferred.push(offline),
+            }
+        }
+
+        // Plaintext DISCONNECTION on the prior channel so the peer resumes the new one at once.
+        let disc = location_nearby_connections::OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::Disconnection.into(),
+                ),
+                disconnection: Some(location_nearby_connections::DisconnectionFrame {
+                    request_safe_to_disconnect: Some(false),
+                    ack_safe_to_disconnect: Some(false),
+                }),
+                ..Default::default()
+            }),
+        };
+        let _ = self.send_frame(disc.encode_to_vec()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        self.socket = crate::hdl::MigratableStream::Tcp(tcp);
+        info!("BWU: upgraded to {:?} ({addr})", info.medium());
+        for f in deferred {
+            self.process_offline_frame(f).await?;
+        }
+        Ok(())
+    }
+}
+
+async fn write_frame_on<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> Result<(), anyhow::Error> {
+    w.write_all(&(data.len() as u32).to_be_bytes()).await?;
+    w.write_all(data).await?;
+    w.flush().await?;
+    Ok(())
+}
+
+async fn read_frame_on<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, anyhow::Error> {
+    let mut len = [0u8; 4];
+    stream_read_exact(r, &mut len).await?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len == 0 || len > SANE_FRAME_LENGTH as usize {
+        return Err(anyhow!("bad frame length {len}"));
+    }
+    let mut buf = vec![0u8; len];
+    stream_read_exact(r, &mut buf).await?;
+    Ok(buf)
 }

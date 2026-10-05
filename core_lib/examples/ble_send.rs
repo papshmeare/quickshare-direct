@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use rqs_lib::OutboundPayload;
 use rqs_lib::channel::{ChannelMessage, Message};
-use rqs_lib::hdl::{OutboundRequest, discover_receiver, weave_connect};
+use rqs_lib::hdl::{MigratableStream, OutboundRequest, discover_receiver, weave_connect};
 use rqs_lib::utils::{DeviceType, RemoteDeviceInfo};
 use tracing_subscriber::EnvFilter;
 
@@ -52,7 +52,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let endpoint_id: [u8; 4] = rand_endpoint_id();
     let mut or = OutboundRequest::new(
         endpoint_id,
-        stream,
+        MigratableStream::Ble(stream),
         "ble-send".into(),
         sender,
         OutboundPayload::Files(vec![file.to_string_lossy().into_owned()]),
@@ -67,6 +67,11 @@ async fn main() -> Result<(), anyhow::Error> {
         if let Err(e) = or.handle().await {
             info!("outbound ended: {e} ({:?})", or.state.state);
             break;
+        }
+        if let Some(offer) = or.take_bwu_offer() {
+            if let Err(e) = or.do_bwu(offer).await {
+                warn!("upgrade failed: {e}");
+            }
         }
     }
     Ok(())
