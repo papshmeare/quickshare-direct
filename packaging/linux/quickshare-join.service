@@ -1,0 +1,16 @@
+# Joins a phone's Wi-Fi Direct group / hotspot on a second interface for sending. Started/stopped on
+# demand by the sender. Set QS_USER to the user who sends (and allow them to start the unit, e.g.
+# with the polkit rule in quickshare-ap.service for "quickshare-join.service").
+# NetworkManager must not manage the join interface: in NetworkManager.conf
+#   [keyfile]
+#   unmanaged-devices=interface-name:qsc0
+[Unit]
+Description=Join a phone's Wi-Fi Direct group for a Quick Share transfer
+
+[Service]
+Type=simple
+Environment=QS_USER=me
+ExecStart=/usr/local/bin/quickshare-join
+ExecStopPost=-/usr/bin/iw dev qsc0 del
+RuntimeDirectory=quickshare-join
+RuntimeDirectoryMode=0750

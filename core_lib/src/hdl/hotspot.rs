@@ -76,7 +76,7 @@ pub fn hotspot_available() -> bool {
 
 /// The frequency (MHz) of the Wi-Fi network we are connected to as a station, if any
 /// (from NetworkManager: `nmcli -g active,chan,freq dev wifi list` → "yes:44:5220 MHz").
-async fn station_frequency() -> Option<i32> {
+pub(crate) async fn station_frequency() -> Option<i32> {
     let out = run("nmcli", &["-g", "active,chan,freq", "device", "wifi", "list", "--rescan", "no"])
         .await
         .ok()?;

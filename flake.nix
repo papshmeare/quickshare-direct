@@ -25,7 +25,8 @@
           doCheck = false;
           postInstall = ''
             install -Dm755 ${./packaging/linux/quickshare-ap} $out/libexec/quickshare-ap
-            patchShebangs $out/libexec/quickshare-ap
+            install -Dm755 ${./packaging/linux/quickshare-join} $out/libexec/quickshare-join
+            patchShebangs $out/libexec
           '';
           meta = {
             description = "Quick Share receiver for Linux: Bluetooth first contact, Wi-Fi Direct/hotspot/LAN transfer";
@@ -93,10 +94,25 @@
                 RuntimeDirectoryMode = "0750";
               };
             };
+            # Root helper for sending: joins the phone's Wi-Fi Direct group / hotspot on a second
+            # station interface (qsc0) with the credentials the sender writes to its runtime dir.
+            systemd.services.quickshare-join = {
+              description = "Join a phone's Wi-Fi Direct group for a Quick Share transfer";
+              path = with pkgs; [ iw iproute2 busybox gawk gnused coreutils systemd ];
+              environment = { QS_STA = cfg.wifiInterface; QS_CLI = "qsc0"; QS_GROUP = "users"; QS_USER = cfg.user; };
+              serviceConfig = {
+                Type = "simple";
+                ExecStart = "${pkgs.bash}/bin/bash ${pkg}/libexec/quickshare-join";
+                ExecStopPost = "-${pkgs.iw}/bin/iw dev qsc0 del";
+                RuntimeDirectory = "quickshare-join";
+                RuntimeDirectoryMode = "0750";
+              };
+            };
             security.polkit.extraConfig = ''
               polkit.addRule(function (action, subject) {
                 if (action.id == "org.freedesktop.systemd1.manage-units" &&
-                    action.lookup("unit") == "quickshare-ap.service" &&
+                    (action.lookup("unit") == "quickshare-ap.service" ||
+                     action.lookup("unit") == "quickshare-join.service") &&
                     subject.user == "${cfg.user}") {
                   return polkit.Result.YES;
                 }
@@ -104,9 +120,10 @@
             '';
             # Keep NetworkManager off the link interfaces (its scans delay an AP by seconds) and stop
             # NixOS restarting wpa_supplicant when they appear (that drops the station connection).
-            networking.networkmanager.unmanaged = [ "interface-name:ap0" "interface-name:p2p-${cfg.wifiInterface}-*" ];
+            networking.networkmanager.unmanaged = [ "interface-name:ap0" "interface-name:qsc0" "interface-name:p2p-${cfg.wifiInterface}-*" ];
             services.udev.extraRules = lib.mkAfter ''
               ACTION=="add|remove", SUBSYSTEM=="net", KERNEL=="ap0", RUN="${pkgs.coreutils}/bin/true"
+              ACTION=="add|remove", SUBSYSTEM=="net", KERNEL=="qsc0", RUN="${pkgs.coreutils}/bin/true"
               ACTION=="add|remove", SUBSYSTEM=="net", KERNEL=="p2p-${cfg.wifiInterface}-*", RUN="${pkgs.coreutils}/bin/true"
             '';
             networking.firewall.allowedTCPPorts = [ cfg.port cfg.upgradePort ];

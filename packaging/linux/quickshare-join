@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# quickshare-join: join a phone's Wi-Fi Direct group / hotspot for sending (runs as root, started on
+# demand by the sender via `systemctl start quickshare-join`; see quickshare-join.service).
+#
+# When we send, the phone is the one that hosts the fast link and gives us its credentials over the
+# encrypted Bluetooth channel. We join it on a second station interface ($QS_CLI, default qsc0) so
+# the normal Wi-Fi connection keeps working (needs a chip that allows two managed interfaces on two
+# channels: `iw list` "#{ managed, P2P-client } <= 2 ... #channels <= 2").
+#
+# Request: $QS_REQUEST (default /run/user/<uid of $QS_USER>/quickshare-join), written by the sender,
+# owned by $QS_USER, with ssid=, password=, frequency= and gateway= lines. Result:
+# $RUNTIME_DIRECTORY/joined (group-readable) with iface= and ip= once we have an address.
+# Everything is removed when the service stops.
+#
+# Environment: QS_USER (required), QS_STA (station interface, default: first managed interface),
+#              QS_CLI (default qsc0), QS_GROUP (default users), QS_REQUEST.
+# Needs: iw, iproute2, busctl (systemd), busybox (udhcpc), wpa_supplicant with D-Bus.
+# NetworkManager must leave $QS_CLI unmanaged.
+set -euo pipefail
+
+CLI=${QS_CLI:-qsc0}
+GROUP=${QS_GROUP:-users}
+DIR=${RUNTIME_DIRECTORY:-/run/quickshare-join}
+mkdir -p "$DIR"
+STA=${QS_STA:-$(iw dev | awk '/Interface/{i=$2} /type managed/{print i; exit}')}
+: "${QS_USER:?QS_USER must name the user allowed to request a join}"
+REQ=${QS_REQUEST:-/run/user/$(id -u "$QS_USER")/quickshare-join}
+
+# The request comes from an unprivileged user: a regular file of theirs, no symlink.
+[ -f "$REQ" ] && [ ! -L "$REQ" ] && [ "$(stat -c %U "$REQ")" = "$QS_USER" ] ||
+  { echo "quickshare-join: no valid request at $REQ" >&2; exit 1; }
+get() { sed -n "s/^$1=//p" "$REQ" | head -1; }
+SSID=$(get ssid); PASS=$(get password); FREQ=$(get frequency); GW=$(get gateway)
+[ -n "$SSID" ] && [ -n "$PASS" ] || { echo "quickshare-join: request without ssid/password" >&2; exit 1; }
+case $FREQ in ''|*[!0-9]*) FREQ= ;; esac
+case $GW in *[!0-9.]*) GW= ;; esac
+
+WPAS=fi.w1.wpa_supplicant1
+cleanup() {
+  [ -n "${DHCP:-}" ] && kill "$DHCP" 2>/dev/null || true
+  [ -n "${IOBJ:-}" ] && busctl call $WPAS /fi/w1/wpa_supplicant1 $WPAS RemoveInterface o "$IOBJ" 2>/dev/null || true
+  iw dev "$CLI" del 2>/dev/null || true
+  rm -f "$DIR/joined" "$DIR/udhcpc.sh"
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+iw dev "$CLI" del 2>/dev/null || true
+iw dev "$STA" interface add "$CLI" type managed
+ip link set "$CLI" up
+
+IOBJ=$(busctl call $WPAS /fi/w1/wpa_supplicant1 $WPAS CreateInterface 'a{sv}' 2 \
+  Ifname s "$CLI" Driver s nl80211 | sed 's/^o "\(.*\)"$/\1/')
+if [ -n "$FREQ" ]; then
+  NOBJ=$(busctl call $WPAS "$IOBJ" $WPAS.Interface AddNetwork 'a{sv}' 4 \
+    ssid s "$SSID" psk s "$PASS" scan_freq s "$FREQ" freq_list s "$FREQ" | sed 's/^o "\(.*\)"$/\1/')
+else
+  NOBJ=$(busctl call $WPAS "$IOBJ" $WPAS.Interface AddNetwork 'a{sv}' 2 \
+    ssid s "$SSID" psk s "$PASS" | sed 's/^o "\(.*\)"$/\1/')
+fi
+busctl call $WPAS "$IOBJ" $WPAS.Interface SelectNetwork o "$NOBJ"
+
+for i in $(seq 150); do
+  [ "$(busctl get-property $WPAS "$IOBJ" $WPAS.Interface State)" = 's "completed"' ] && break
+  sleep 0.1
+done
+[ "$(busctl get-property $WPAS "$IOBJ" $WPAS.Interface State)" = 's "completed"' ] ||
+  { echo "quickshare-join: couldn't join $SSID" >&2; exit 1; }
+
+# Address from the phone's DHCP server; a fixed one in the gateway's /24 if that doesn't answer.
+cat > "$DIR/udhcpc.sh" <<'EOF'
+#!/bin/sh
+case "$1" in bound|renew) ip addr flush dev "$interface"; ip addr add "$ip/${mask:-24}" dev "$interface" ;; esac
+EOF
+chmod 0700 "$DIR/udhcpc.sh"
+if busybox udhcpc -i "$CLI" -n -q -t 4 -T 1 -s "$DIR/udhcpc.sh" >/dev/null 2>&1; then
+  :
+elif [ -n "$GW" ]; then
+  ip addr add "${GW%.*}.$((100 + RANDOM % 100))/24" dev "$CLI"
+else
+  echo "quickshare-join: no address on $CLI" >&2; exit 1
+fi
+IP=$(ip -4 -o addr show dev "$CLI" | awk '{print $4}' | cut -d/ -f1 | head -1)
+
+umask 027
+printf 'iface=%s\nip=%s\n' "$CLI" "$IP" > "$DIR/joined.tmp"
+chgrp "$GROUP" "$DIR/joined.tmp" "$DIR"
+chmod 0750 "$DIR"
+mv "$DIR/joined.tmp" "$DIR/joined"
+echo "quickshare-join: joined $SSID on $CLI ($FREQ MHz) as $IP, next to $STA"
+
+# Stay up until the sender stops the service.
+while :; do sleep 3600 & wait $!; done

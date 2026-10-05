@@ -71,6 +71,9 @@ pub struct OutboundRequest<S = TcpStream> {
     payload: OutboundPayload,
     /// Upgrade path offered by the receiver, not yet acted on (see `take_bwu_offer`).
     bwu_offer: Option<UpgradePathInfo>,
+    /// The receiver's Wi-Fi Direct group / hotspot we joined for the upgrade (left on drop).
+    #[cfg(all(feature = "experimental", target_os = "linux"))]
+    joined: Option<crate::hdl::JoinGuard>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
@@ -110,6 +113,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
             receiver,
             payload,
             bwu_offer: None,
+            #[cfg(all(feature = "experimental", target_os = "linux"))]
+            joined: None,
         }
     }
 
@@ -222,6 +227,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
 
     pub async fn send_connection_request(&mut self) -> Result<(), anyhow::Error> {
         let device_name = DEVICE_NAME.read().unwrap().clone();
+        // Lets the receiver host its Wi-Fi Direct group on 5 GHz, ideally on our station's channel.
+        #[cfg(all(feature = "experimental", target_os = "linux"))]
+        let ap_frequency = crate::hdl::station_frequency().await;
+        #[cfg(not(all(feature = "experimental", target_os = "linux")))]
+        let ap_frequency: Option<i32> = None;
         let request = location_nearby_connections::OfflineFrame {
             version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
             v1: Some(location_nearby_connections::V1Frame {
@@ -238,7 +248,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
                         }
                         .serialize(),
                     ),
-                    mediums: vec![Medium::WifiLan.into()],
+                    mediums: send_mediums(),
+                    medium_metadata: Some(location_nearby_connections::MediumMetadata {
+                        supports_5_ghz: Some(true),
+                        ap_frequency: Some(ap_frequency.unwrap_or(-1)),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1372,6 +1387,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
     }
 }
 
+/// Upgrade mediums we tell the receiver we support (it picks one and hosts it).
+/// QSD_SEND_MEDIUMS (comma separated: wifi_lan, wifi_direct, wifi_hotspot) overrides the default.
+fn send_mediums() -> Vec<i32> {
+    let spec = std::env::var("QSD_SEND_MEDIUMS").unwrap_or_else(|_| "wifi_lan".into());
+    spec.split(',')
+        .filter_map(|m| match m.trim() {
+            "wifi_lan" => Some(Medium::WifiLan),
+            "wifi_direct" => Some(Medium::WifiDirect),
+            "wifi_hotspot" => Some(Medium::WifiHotspot),
+            _ => None,
+        })
+        .map(Into::into)
+        .collect()
+}
+
 fn bwu_frame(event_type: EventType) -> OfflineFrame {
     location_nearby_connections::OfflineFrame {
         version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
@@ -1391,6 +1421,15 @@ fn bwu_frame(event_type: EventType) -> OfflineFrame {
     }
 }
 
+/// Give up on the upgrade (the transfer continues on the prior channel).
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+macro_rules! bail_stay {
+    ($($arg:tt)*) => {{
+        warn!("BWU: {}; staying on the prior channel", format!($($arg)*));
+        return Ok(());
+    }};
+}
+
 #[cfg(all(feature = "experimental", target_os = "linux"))]
 impl OutboundRequest<crate::hdl::MigratableStream> {
     /// The receiver's pending upgrade offer, if any (the receiver is the BWU initiator).
@@ -1405,7 +1444,7 @@ impl OutboundRequest<crate::hdl::MigratableStream> {
     pub async fn do_bwu(&mut self, info: UpgradePathInfo) -> Result<(), anyhow::Error> {
         use location_nearby_connections::bandwidth_upgrade_negotiation_frame::ClientIntroduction;
 
-        let addr = match info.medium() {
+        let (addr, bind_ip) = match info.medium() {
             Medium::WifiLan => {
                 let s = info
                     .wifi_lan_socket
@@ -1415,19 +1454,50 @@ impl OutboundRequest<crate::hdl::MigratableStream> {
                     .ip_address()
                     .try_into()
                     .map_err(|_| anyhow!("bad WIFI_LAN address"))?;
-                std::net::SocketAddr::from((ip, s.wifi_port() as u16))
+                (std::net::SocketAddr::from((ip, s.wifi_port() as u16)), None)
             }
-            other => {
-                warn!("BWU: {other:?} not supported for sending yet; staying on the prior channel");
-                return Ok(());
+            Medium::WifiDirect | Medium::WifiHotspot => {
+                // The receiver hosts the link; join it with the helper, then connect to its gateway.
+                let (ssid, password, port, frequency, gateway) =
+                    match (&info.wifi_direct_credentials, &info.wifi_hotspot_credentials) {
+                        (Some(c), _) => (c.ssid(), c.password(), c.port(), c.frequency(), c.gateway()),
+                        (None, Some(c)) => {
+                            (c.ssid(), c.password(), c.port(), c.frequency(), c.gateway())
+                        }
+                        _ => bail_stay!("{:?} offer without credentials", info.medium()),
+                    };
+                let gw: std::net::Ipv4Addr = match gateway.parse() {
+                    Ok(g) => g,
+                    Err(_) => bail_stay!("bad gateway {gateway:?}"),
+                };
+                info!(
+                    "BWU: receiver hosts {:?} {ssid:?} ({frequency} MHz, {gw}:{port})",
+                    info.medium()
+                );
+                if !crate::hdl::join_available() {
+                    bail_stay!("{:?} offered but the join helper isn't installed", info.medium());
+                }
+                let guard = match crate::hdl::join_network(ssid, password, frequency, gateway).await
+                {
+                    Ok(g) => g,
+                    Err(e) => bail_stay!("couldn't join {ssid:?}: {e}"),
+                };
+                let ip = guard.ip;
+                self.joined = Some(guard);
+                (std::net::SocketAddr::from((gw, port as u16)), Some(ip))
             }
+            other => bail_stay!("{other:?} not supported for sending yet"),
         };
         info!("BWU: connecting to {addr}");
-        let mut tcp = match tokio::time::timeout(
-            Duration::from_secs(10),
-            TcpStream::connect(addr),
-        )
-        .await
+        let connect = async {
+            let sock = tokio::net::TcpSocket::new_v4()?;
+            if let Some(ip) = bind_ip {
+                // Leave over the joined interface even if the main Wi-Fi uses a similar subnet.
+                sock.bind((ip, 0).into())?;
+            }
+            sock.connect(addr).await
+        };
+        let mut tcp = match tokio::time::timeout(Duration::from_secs(10), connect).await
         {
             Ok(Ok(s)) => s,
             r => {
