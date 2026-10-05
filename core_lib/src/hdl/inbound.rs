@@ -1975,10 +1975,10 @@ impl InboundRequest<crate::hdl::MigratableStream> {
         self.socket = crate::hdl::MigratableStream::Tcp(tcp);
         info!(
             "BWU: upgraded to {}; payload continues over TCP",
-            if self.hotspot.is_some() {
-                "our Wi-Fi hotspot"
-            } else {
-                "Wi-Fi LAN"
+            match &self.hotspot {
+                Some(h) if h.0.wifi_direct => "our Wi-Fi Direct group",
+                Some(_) => "our Wi-Fi hotspot",
+                None => "Wi-Fi LAN",
             }
         );
         Ok(())
