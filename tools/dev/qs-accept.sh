@@ -4,7 +4,8 @@ mkdir -p "${QSD_TMP:-/tmp/qsd-dev}"
 # (QS_BUTTON=Decline taps that instead).
 A="adb ${ADB_SERIAL:+-s $ADB_SERIAL}"; T=${QSD_TMP:-/tmp/qsd-dev}
 for i in $(seq 1 "${1:-30}"); do
-  $A shell uiautomator dump /data/local/tmp/ui.xml >/dev/null 2>&1; $A pull /data/local/tmp/ui.xml $T/ui.xml >/dev/null 2>&1
+  rm -f $T/ui.xml # never act on a leftover dump
+  $A shell uiautomator dump /data/local/tmp/ui.xml >/dev/null 2>&1; $A pull /data/local/tmp/ui.xml $T/ui.xml >/dev/null 2>&1 || { sleep 2; continue; }
   b=$(python3 - "$T/ui.xml" "${QS_BUTTON:-Accept}" <<'PY'
 import sys,re,xml.etree.ElementTree as E
 for n in E.parse(sys.argv[1]).iter('node'):

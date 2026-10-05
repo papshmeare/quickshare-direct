@@ -3,7 +3,9 @@ mkdir -p "${QSD_TMP:-/tmp/qsd-dev}"
 # qs-receive-mode.sh: put the phone (USB adb) on the Quick Share Receive screen, which makes it
 # advertise as a receiver ("Temporarily visible to everyone"). Exits 1 if it doesn't get there.
 A="adb ${ADB_SERIAL:+-s $ADB_SERIAL}"; T=${QSD_TMP:-/tmp/qsd-dev}
-ui() { $A shell uiautomator dump /data/local/tmp/ui.xml >/dev/null 2>&1; $A pull /data/local/tmp/ui.xml $T/ui.xml >/dev/null 2>&1; }
+$A get-state >/dev/null 2>&1 || { echo "phone not reachable over adb"; exit 1; }
+# A fresh dump each time: a leftover ui.xml would look like a phone on the right screen.
+ui() { rm -f $T/ui.xml; $A shell uiautomator dump /data/local/tmp/ui.xml >/dev/null 2>&1; $A pull /data/local/tmp/ui.xml $T/ui.xml >/dev/null 2>&1 || touch $T/ui.xml; }
 tap() { # tap the first node whose text is exactly $1
   b=$(python3 - "$1" "$T/ui.xml" <<'PY'
 import sys,re,xml.etree.ElementTree as E
