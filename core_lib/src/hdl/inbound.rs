@@ -1303,8 +1303,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                     file: None,
                 };
                 total_bytes += info.total_size as u64;
+                // The name actually written (after "name (1).ext" conflict renaming).
+                let written_name = info
+                    .file_url
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| resolved_name.clone());
                 self.state.transferred_files.insert(file.payload_id(), info);
-                files_name.push(resolved_name.clone());
+                files_name.push(written_name);
             }
 
             let metadata = TransferMetadata {

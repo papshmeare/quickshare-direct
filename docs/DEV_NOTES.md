@@ -103,6 +103,15 @@ Fixes on the way:
 - Transfer ids were constant ("ble-weave") for BLE sessions; clients that track ids (our
   notification daemon) skipped every transfer after the first. Now unique per session.
 
+## 2026-10-05: throughput
+
+300 MB from a Pixel 10 over the VHT80 Wi-Fi Direct group (link 585-780 Mbit/s, -50..-54 dBm):
+33-37 MB/s average, 56-59 MB/s peaks; ~1 % CPU per MB/s on the receiver (not CPU-bound).
+A run where the phone rejoined its home Wi-Fi mid-transfer averaged 16 MB/s (scan/association
+dips on the phone side). The phone's home Wi-Fi was on the same channel (5220 MHz), so no
+multi-channel hopping. HE (Wi-Fi 6) isn't available for P2P-GO on MT7922 (HE iftypes: managed,
+AP only). Wi-Fi power save on the station made no measurable difference.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle

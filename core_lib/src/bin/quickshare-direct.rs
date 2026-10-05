@@ -122,6 +122,37 @@ fn open_detached(target: &str) {
     }
 }
 
+/// file:// URI for a path (percent-encoding everything but unreserved characters and '/').
+fn file_uri(path: &std::path::Path) -> String {
+    let mut s = String::from("file://");
+    for b in path.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s
+}
+
+/// Show the files selected in the file manager (org.freedesktop.FileManager1.ShowItems: Thunar,
+/// Nautilus, Dolphin, ...); falls back to opening the folder.
+async fn show_items(dir: &std::path::Path, files: &[String]) {
+    let uris: Vec<String> = files.iter().map(|f| file_uri(&dir.join(f))).collect();
+    let mut cmd = Command::new("busctl");
+    cmd.args([
+        "--user", "call", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+        "org.freedesktop.FileManager1", "ShowItems", "ass",
+    ])
+    .arg(uris.len().to_string())
+    .args(&uris)
+    .arg("");
+    let ok = !uris.is_empty() && cmd.output().await.map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
+        open_detached(&dir.to_string_lossy());
+    }
+}
+
 async fn copy_to_clipboard(text: &str) {
     use tokio::io::AsyncWriteExt;
     let mut cmd = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -247,14 +278,18 @@ async fn main() -> Result<(), anyhow::Error> {
                                 if notify(
                                     &format!("Received from {from}"),
                                     &describe(&meta),
-                                    &[("open", "Open folder")],
+                                    &[("open", "Show in folder")],
                                     None,
                                 )
                                 .await
                                 .as_deref()
                                     == Some("open")
                                 {
-                                    open_detached(&dir.to_string_lossy());
+                                    let files = match &meta.payload {
+                                        Some(TransferPayload::Files(f)) => f.clone(),
+                                        _ => Vec::new(),
+                                    };
+                                    show_items(&dir, &files).await;
                                 }
                             }
                         }
