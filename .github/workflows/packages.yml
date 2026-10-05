@@ -20,7 +20,7 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: |
           shellcheck -S warning -s sh install.sh packaging/scripts/*.sh
@@ -37,14 +37,14 @@ jobs:
           - { runner: ubuntu-22.04-arm, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core_lib
       - run: packaging/ci/install-build-deps.sh
       - run: packaging/build-packages.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: packages-${{ matrix.arch }}
           path: dist/*
@@ -58,8 +58,8 @@ jobs:
       matrix:
         image: ['debian:12', 'debian:13', 'ubuntu:22.04', 'ubuntu:24.04', 'fedora:latest', 'archlinux:latest', 'opensuse/tumbleweed']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: packages-x86_64
           path: dist
@@ -74,7 +74,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: version
         run: |
           v=$(tr -d ' \n' < VERSION)
@@ -87,7 +87,7 @@ jobs:
             echo "new=true" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.version.outputs.new == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: packages-*
           path: dist
