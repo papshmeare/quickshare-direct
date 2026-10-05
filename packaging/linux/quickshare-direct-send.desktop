@@ -7,5 +7,6 @@ Icon=network-wireless
 Exec=quickshare-direct send %F
 Terminal=false
 NoDisplay=true
-MimeType=application/octet-stream;image/*;video/*;audio/*;text/plain;application/pdf;application/zip;
+# Explicit types: GIO (Thunar, Nautilus) ignores wildcards like image/*.
+MimeType=application/octet-stream;image/jpeg;image/png;image/gif;image/webp;image/heic;image/heif;image/avif;image/tiff;image/bmp;image/svg+xml;image/x-adobe-dng;video/mp4;video/quicktime;video/webm;video/x-matroska;video/x-msvideo;video/3gpp;video/mpeg;audio/mpeg;audio/mp4;audio/ogg;audio/flac;audio/x-flac;audio/wav;audio/x-wav;audio/aac;audio/opus;audio/x-m4a;text/plain;text/csv;text/html;application/pdf;application/zip;application/x-tar;application/gzip;application/x-7z-compressed;application/vnd.android.package-archive;application/epub+zip;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/msword;application/vnd.ms-excel;
 Categories=Network;FileTransfer;

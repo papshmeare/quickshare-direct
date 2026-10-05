@@ -1,0 +1,8 @@
+[Desktop Entry]
+# Thunar "Send To" entry (share/Thunar/sendto): without a MimeType it is offered for every file.
+Type=Application
+Version=1.0
+Name=Phone (Quick Share)
+Comment=Send to a nearby Android phone on its Quick Share Receive screen
+Icon=network-wireless
+Exec=quickshare-direct send %F

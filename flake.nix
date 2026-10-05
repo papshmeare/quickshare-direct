@@ -30,7 +30,11 @@
             # "Send with Quick Share" in the file manager's Open With menu.
             install -Dm644 ${./packaging/linux/quickshare-direct-send.desktop} \
               $out/share/applications/quickshare-direct-send.desktop
+            # ... and in Thunar's Send To menu, for any file.
+            install -Dm644 ${./packaging/linux/quickshare-direct-sendto.desktop} \
+              $out/share/Thunar/sendto/quickshare-direct.desktop
             substituteInPlace $out/share/applications/quickshare-direct-send.desktop \
+              $out/share/Thunar/sendto/quickshare-direct.desktop \
               --replace-fail "Exec=quickshare-direct" "Exec=$out/bin/quickshare-direct"
           '';
           meta = {
@@ -88,6 +92,7 @@
           config = lib.mkIf cfg.enable {
             # `quickshare-direct send FILE...` and the file manager's "Send with Quick Share".
             environment.systemPackages = [ pkg ];
+            environment.pathsToLink = [ "/share/Thunar" ];   # Thunar's Send To entries
             # Root helper: creates/removes the direct Wi-Fi link on demand.
             systemd.services.quickshare-ap = {
               description = "Temporary direct Wi-Fi link for Quick Share transfers";

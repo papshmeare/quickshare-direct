@@ -182,7 +182,10 @@ with matching PIN), using `hdl/gatt_client.rs` (now `quickshare-direct send`, `h
   outbound didn't read frames while streaming, so the files went over BLE (~200 KB/s) until the
   phone dropped the link: the send driver now holds the files after Accept for up to 10 s until
   the upgrade is done. 70 MB in two files: 4.1 s over Wi-Fi Direct, md5 identical. A phone
-  Decline now ends as Rejected (was Disconnected).
+  Decline now ends as Rejected (was Disconnected). GIO ignores MimeType wildcards (image/* etc.),
+  so the Open With entry lists types explicitly; Thunar's Send To entry (share/Thunar/sendto, no
+  MimeType) covers every file. Launched via `gio launch` like a file manager: 5 MB sent, md5 OK.
+  blueman's ConnectionNotifier shows its own "Connected" popup for the BLE link.
 
 ## Plan
 

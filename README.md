@@ -57,7 +57,8 @@ quickshare-direct devices                       # list phones in receive mode
 ```
 It finds the phone over Bluetooth, shows the PIN, and once you accept on the phone the files go
 over the phone's Wi-Fi Direct group (joined on a second interface, your Wi-Fi stays connected).
-In the file manager: Open With → "Send with Quick Share" (reports through notifications).
+In the file manager: Thunar's **Send To → Phone (Quick Share)** (any file), or Open With →
+"Send with Quick Share" (common file types); it reports through notifications.
 
 ### Install (other distros)
 
@@ -66,7 +67,8 @@ Build `core_lib` (`cargo build --release --bin quickshare-direct`; needs `protoc
   busctl, wpa_supplicant with P2P + D-Bus) and `packaging/linux/quickshare-ap.service`, with the
   polkit rule and NetworkManager `unmanaged-devices` shown in the unit file; for sending also
   `packaging/linux/quickshare-join` + `.service` (needs busybox for udhcpc) and the
-  `quickshare-direct-send.desktop` entry;
+  `quickshare-direct-send.desktop` entry (Thunar: `quickshare-direct-sendto.desktop` in
+  `share/Thunar/sendto/`);
 - open TCP 46257/46258 and run the receiver with `QSD_PORT=46257 QSD_BWU_PORT=46258`;
 - notifications use `notify-send` (libnotify ≥ 0.8) with actions: use a notification daemon that
   shows action buttons (e.g. swaync, mako with a menu, GNOME, KDE).
