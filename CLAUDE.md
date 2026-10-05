@@ -36,6 +36,10 @@ measurements, open plan), docs/BLE_RECEIVER_DISCOVERY.md (BLE/weave protocol).
   in Debian/Ubuntu/Fedora/Arch/openSUSE containers (`packaging/ci/test-install.sh`), and
   publishes release `qsd-v<VERSION>` when `VERSION` changes on main (upstream rQuickShare tags
   v0.x already exist, hence the prefix). Bump `VERSION` to release.
+- Not ours / unused: `app/` (rQuickShare's Tauri GUI; depends on core_lib, nothing depends on
+  it; LAN-only sending; not built or tested, may not compile against today's core_lib), `snap/`,
+  `BUILD.md`, `CHANGELOG.md`, release-please, `build.yml`/`lint.yml` (upstream `master` only).
+  The README below "Repository layout" is upstream's text about that app.
 - `tools/dev/`: test harness (USB adb drives the phone's share sheet; see below).
 
 ## Dev loop

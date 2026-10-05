@@ -113,6 +113,14 @@ with Bluetooth work by [nozwock](https://github.com/nozwock) and
 Releases: CI (`.github/workflows/packages.yml`) builds and install-tests the packages on every
 push; bumping `VERSION` on `main` publishes the release `qsd-v<VERSION>`.
 
+Repository layout: quickshare-direct is `core_lib` (library + the `quickshare-direct` binary) and
+`packaging/`; that's all the packages, the NixOS module and CI build. `app/` is rQuickShare's
+Tauri desktop app, kept from the fork but not built, shipped or tested here: its sending only
+works on a shared Wi-Fi (mDNS + TCP), without the Bluetooth / Wi-Fi Direct path of
+`quickshare-direct send`. The same goes for the other upstream leftovers (`snap/`, `BUILD.md`,
+`CHANGELOG.md`, release-please, the `build`/`lint` workflows, which run on upstream's `master`).
+The rest of this README below is rQuickShare's and describes that app.
+
 Development: `nix develop`, then in `core_lib`: `cargo run --bin quickshare-direct`
 (env: `QSD_DIR`, `QSD_NAME`, `QSD_PORT`, `QSD_BWU_PORT`, `QSD_BWU=lan|hotspot`, `RUST_LOG`).
 
