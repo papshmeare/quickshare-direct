@@ -112,6 +112,17 @@ dips on the phone side). The phone's home Wi-Fi was on the same channel (5220 MH
 multi-channel hopping. HE (Wi-Fi 6) isn't available for P2P-GO on MT7922 (HE iftypes: managed,
 AP only). Wi-Fi power save on the station made no measurable difference.
 
+## 2026-10-05: 160 MHz?
+
+- Wi-Fi Direct at 160 MHz isn't possible on MT7922 in the EU: every 5 GHz 160 MHz channel includes
+  DFS channels, and the driver lacks `DFS_CONCURRENT` (GO on a DFS channel while the station is
+  associated to an AP there); 6 GHz needs HE, which the chip doesn't offer for P2P-GO; an AP
+  (HE-capable) must share the station's channel.
+- The shared-router path with both devices at 160 MHz HE (phone 1200 Mbit/s, laptop 576-720
+  Mbit/s link rates) gave 2.4 MB/s average for raw TCP phone → router → laptop (300 MB, `nc` from
+  an adb shell; bursts to 16 MB/s, long stalls). Two air hops on one channel plus router behaviour:
+  far below the direct VHT80 link (33-37 MB/s). Keep preferring Wi-Fi Direct.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
