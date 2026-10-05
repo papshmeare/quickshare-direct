@@ -342,7 +342,8 @@ async fn cmd_send(args: &[String]) -> Result<i32, anyhow::Error> {
     tokio::pin!(send);
 
     let mut shown_pin = false;
-    let mut started: Option<std::time::Instant> = None;
+    // When the first data was acknowledged, and how much.
+    let mut started: Option<(std::time::Instant, u64)> = None;
     let mut last_progress = std::time::Instant::now();
     let result = loop {
         tokio::select! {
@@ -357,8 +358,9 @@ async fn cmd_send(args: &[String]) -> Result<i32, anyhow::Error> {
                         let pin = meta.pin_code.map(|p| format!(" (PIN {p})")).unwrap_or_default();
                         rep.status(&format!("Sending {what} to {target}"), &format!("accept on the phone{pin}")).await;
                     }
-                    Some(TransferState::SendingFiles) => {
-                        let t0 = *started.get_or_insert_with(std::time::Instant::now);
+                    // Accept already reports SendingFiles while the link upgrades; time the data.
+                    Some(TransferState::SendingFiles) if meta.ack_bytes > 0 => {
+                        let (t0, _) = *started.get_or_insert((std::time::Instant::now(), meta.ack_bytes));
                         if last_progress.elapsed().as_millis() >= 200 {
                             last_progress = std::time::Instant::now();
                             let rate = meta.ack_bytes as f64 / t0.elapsed().as_secs_f64().max(0.001);
@@ -370,11 +372,16 @@ async fn cmd_send(args: &[String]) -> Result<i32, anyhow::Error> {
             }
         }
     };
-    let secs = started.map(|t| t.elapsed().as_secs_f64());
+    // Rate over the data after the first acknowledgement (left out for too short a sample).
+    let timing = started
+        .map(|(t, first)| (t.elapsed().as_secs_f64(), total_size.saturating_sub(first)))
+        .filter(|(s, bytes)| *s >= 0.2 && *bytes > 0);
     match result {
         Ok(TransferState::Finished) => {
-            let rate = secs.map(|s| format!(" in {s:.1} s ({}/s)", human_size((total_size as f64 / s.max(0.001)) as u64))).unwrap_or_default();
-            rep.status(&format!("Sent {what} to {target}"), &rate.trim_start().to_string()).await;
+            let rate = timing
+                .map(|(s, bytes)| format!("{}/s", human_size((bytes as f64 / s) as u64)))
+                .unwrap_or_default();
+            rep.status(&format!("Sent {what} to {target}"), &rate).await;
             Ok(0)
         }
         Ok(TransferState::Rejected) => {

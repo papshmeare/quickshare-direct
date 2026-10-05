@@ -16,6 +16,10 @@ measurements, open plan), docs/BLE_RECEIVER_DISCOVERY.md (BLE/weave protocol).
   (mode p2p → WIFI_DIRECT offer, ap → WIFI_HOTSPOT); NetworkManager fallback.
 - `core_lib/src/hdl/{gatt,blea,rfcomm}.rs`: BLE GATT/weave server, BLE advertisement, Bluetooth
   Classic RFCOMM (opt-in `QSD_BT_CLASSIC=1`, still fails with "read failed").
+- Sending: `hdl/send.rs` (driver), `hdl/gatt_client.rs` (discovery, weave client),
+  `hdl/att.rs` (own ATT bearer on an L2CAP socket so the MTU exchange comes after the phone's
+  private GATT server attaches), `hdl/outbound.rs` (sender state machine, BWU as responder),
+  `hdl/join.rs` + `packaging/linux/quickshare-join` (join the phone's Wi-Fi Direct group).
 - `core_lib/src/bin/quickshare-direct.rs`: the daemon (notifications via notify-send actions:
   Accept/Decline with PIN, "Show in folder" via org.freedesktop.FileManager1.ShowItems).
 - `packaging/linux/quickshare-ap`: root helper (Wi-Fi Direct GO via wpa_supplicant D-Bus GroupAdd
@@ -48,4 +52,4 @@ Works end to end with a Pixel 10: prompt 0.4 s after the PIN, Wi-Fi Direct VHT80
 (300 MB), files land in ~/Downloads, "Show in folder" selects them. Sending works too
 (`quickshare-direct send`, phone on its Receive screen → BLE → phone's Wi-Fi Direct group joined by
 `quickshare-join` on qsc0, ~36 MB/s). Open items: see the Plan in docs/DEV_NOTES.md (Bluetooth
-Classic, phone join ~4 s, weave MTU for sending, upstreaming).
+Classic, phone join ~4 s, LE link setup ~6 s when sending, upstreaming).

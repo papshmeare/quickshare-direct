@@ -4,6 +4,8 @@ use std::time::Duration;
 use anyhow::anyhow;
 use bluer::gatt::remote::Characteristic;
 use bluer::{Adapter, Address, Device, Uuid, UuidExt};
+
+use crate::hdl::att::AttClient;
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
@@ -22,10 +24,9 @@ const WEAVE_CMD_CONN_REQUEST: u8 = 0;
 const WEAVE_CMD_CONN_CONFIRM: u8 = 1;
 const WEAVE_CMD_ERROR: u8 = 2;
 const WEAVE_PROTOCOL_VERSION: u16 = 1;
-// The phone's (private) GATT server keeps the default ATT MTU for its indications even after a
-// 517 exchange: anything over 20 bytes fails with status 133 on its side (Pixel 10, Oct 2026).
-// So ask for the minimum weave packet; QSD_WEAVE_PACKET overrides it for experiments.
-const WEAVE_MAX_PACKET: u16 = 20;
+// Smallest weave packet (fits the default ATT MTU). The weave packet size otherwise follows the
+// link's MTU; QSD_WEAVE_PACKET overrides it for experiments.
+const WEAVE_MIN_PACKET: u16 = 20;
 
 const QS_SVC_HASH: [u8; 3] = [0xfc, 0x9f, 0x5e];
 // SocketControlFrame { type: INTRODUCTION, introduction { service_id_hash: fc9f5e,
@@ -165,6 +166,104 @@ async fn find_weave_chars(dev: &Device) -> Result<(Characteristic, Characteristi
 
 /// Connects to the receiver's weave socket (we are the GATT client) and returns one side of a
 /// duplex carrying the `[len][OfflineFrame]` stream, ready for an `OutboundRequest`.
+/// Writes weave packets to the peer's "to peripheral" characteristic.
+enum WeaveWriter {
+    Bluez { chr: Characteristic, dev: Device },
+    Att { client: std::sync::Arc<AttClient>, handle: u16 },
+}
+
+impl WeaveWriter {
+    async fn write(&self, pkt: &[u8]) -> Result<(), anyhow::Error> {
+        match self {
+            Self::Bluez { chr, .. } => Ok(chr.write(pkt).await?),
+            Self::Att { client, handle } => client.write_request(*handle, pkt).await,
+        }
+    }
+
+    async fn close(&self) {
+        match self {
+            Self::Bluez { dev, .. } => {
+                let _ = dev.disconnect().await;
+            }
+            // The link goes down when the last reference to the socket is dropped.
+            Self::Att { .. } => {}
+        }
+    }
+}
+
+type PacketStream = std::pin::Pin<Box<dyn futures::Stream<Item = Vec<u8>> + Send>>;
+
+/// Our own ATT bearer (see att.rs): discovery, then the MTU exchange, then subscribe.
+/// Returns the writer, the indication stream and the largest weave packet the link carries.
+async fn open_att(dev: &Device) -> Result<(WeaveWriter, PacketStream, u16), anyhow::Error> {
+    let addr = dev.address();
+    let addr_type = dev.address_type().await?;
+    let (client, mut rx) = AttClient::connect(addr, addr_type).await?;
+    debug!("{INNER_NAME}: ATT link up");
+    let to_p: Uuid = QS_WEAVE_TO_PERIPHERAL.parse()?;
+    let from_p: Uuid = QS_WEAVE_FROM_PERIPHERAL.parse()?;
+    let mut found = None;
+    for (start, end, uuid) in client.primary_services().await? {
+        if uuid != Uuid::from_u16(QS_GATT_SERVICE) {
+            continue;
+        }
+        let chars = client.characteristics(start, end).await?;
+        let w = chars.iter().find(|c| c.uuid == to_p);
+        let n = chars.iter().find(|c| c.uuid == from_p);
+        if let (Some(w), Some(n)) = (w, n) {
+            found = Some((w.value_handle, n.clone(), end));
+            break;
+        }
+    }
+    let (write_handle, notify, svc_end) =
+        found.ok_or_else(|| anyhow!("no weave characteristics on {addr}"))?;
+    let cccd = client
+        .descriptors(notify.value_handle + 1, svc_end)
+        .await?
+        .into_iter()
+        .find(|(_, u)| *u == crate::hdl::att::uuid_from_u16(0x2902))
+        .map(|(h, _)| h)
+        .ok_or_else(|| anyhow!("no CCCD for the weave characteristic"))?;
+    debug!("{INNER_NAME}: discovery done");
+    // After discovery, like an Android central: the phone's private GATT server is attached by
+    // now and takes the new MTU for its indications.
+    let mtu = client.exchange_mtu().await?;
+    let indicate = notify.properties & 0x20 != 0;
+    client
+        .write_request(cccd, if indicate { &[0x02, 0x00] } else { &[0x01, 0x00] })
+        .await?;
+    let notify_handle = notify.value_handle;
+    let stream = futures::stream::poll_fn(move |cx| loop {
+        match rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some((h, v))) if h == notify_handle => {
+                return std::task::Poll::Ready(Some(v));
+            }
+            std::task::Poll::Ready(Some(_)) => continue,
+            other => return other.map(|o| o.map(|(_, v)| v)),
+        }
+    });
+    let max_packet = (mtu - 3).min(509);
+    info!("{INNER_NAME}: own ATT bearer to {addr}, MTU {mtu}");
+    Ok((WeaveWriter::Att { client, handle: write_handle }, Box::pin(stream), max_packet))
+}
+
+/// bluetoothd's GATT client (fallback). Its MTU exchange comes too early for the phone's
+/// private GATT server, so only 20-byte weave packets get through.
+async fn open_bluez(dev: &Device) -> Result<(WeaveWriter, PacketStream, u16), anyhow::Error> {
+    dev.connect().await?;
+    for _ in 0..100 {
+        if dev.is_services_resolved().await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (write_c, notify_c) = find_weave_chars(dev).await?;
+    let notes = notify_c.notify().await?;
+    Ok((WeaveWriter::Bluez { chr: write_c, dev: dev.clone() }, Box::pin(notes), WEAVE_MIN_PACKET))
+}
+
+/// Connects to the receiver's weave socket (we are the GATT client) and returns one side of a
+/// duplex carrying the `[len][OfflineFrame]` stream, ready for an `OutboundRequest`.
 pub async fn weave_connect(adapter: &Adapter, addr: Address) -> Result<DuplexStream, anyhow::Error> {
     let dev = adapter.device(addr)?;
     // The receiver's GATT server is private to the advertising set the connection came in
@@ -174,16 +273,19 @@ pub async fn weave_connect(adapter: &Adapter, addr: Address) -> Result<DuplexStr
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     info!("{INNER_NAME}: connecting to {addr}");
-    dev.connect().await?;
-    for _ in 0..100 {
-        if dev.is_services_resolved().await? {
-            break;
+    let own_att = std::env::var("QSD_WEAVE_ATT").map(|v| v != "0").unwrap_or(true);
+    let (write_c, mut notes, link_packet) = if own_att {
+        match open_att(&dev).await {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("{INNER_NAME}: own ATT bearer failed ({e}); using bluetoothd's");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                open_bluez(&dev).await?
+            }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let (write_c, notify_c) = find_weave_chars(&dev).await?;
-    let notes = notify_c.notify().await?;
-    let mut notes = Box::pin(notes);
+    } else {
+        open_bluez(&dev).await?
+    };
 
     // 1. Weave connection handshake: we send CONN_REQUEST (counter 0), the peer confirms.
     let mut req = [
@@ -192,13 +294,13 @@ pub async fn weave_connect(adapter: &Adapter, addr: Address) -> Result<DuplexStr
         (WEAVE_PROTOCOL_VERSION & 0xff) as u8,
         (WEAVE_PROTOCOL_VERSION >> 8) as u8,
         (WEAVE_PROTOCOL_VERSION & 0xff) as u8,
-        (WEAVE_MAX_PACKET >> 8) as u8,
-        (WEAVE_MAX_PACKET & 0xff) as u8,
+        0,
+        0,
     ];
     let max_packet: u16 = std::env::var("QSD_WEAVE_PACKET")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(WEAVE_MAX_PACKET);
+        .unwrap_or(link_packet);
     req[5..7].copy_from_slice(&max_packet.to_be_bytes());
     write_c.write(&req).await?;
     let selected = tokio::time::timeout(Duration::from_secs(10), async {
@@ -301,7 +403,7 @@ pub async fn weave_connect(adapter: &Adapter, addr: Address) -> Result<DuplexStr
             }
         }
         info!("{INNER_NAME}: weave: session ended");
-        let _ = dev.disconnect().await;
+        write_c.close().await;
     });
 
     Ok(or_side)

@@ -187,6 +187,19 @@ with matching PIN), using `hdl/gatt_client.rs` (now `quickshare-direct send`, `h
   MimeType) covers every file. Launched via `gio launch` like a file manager: 5 MB sent, md5 OK.
   blueman's ConnectionNotifier shows its own "Connected" popup for the BLE link.
 
+- **Weave MTU (done).** Phone log of the first spike: `gatts_process_mtu_req: MTU 517` at
+  04.529, `bluetooth_private_gatt::gatt::server: connected on tcb_idx` at 04.532: the private
+  GATT server attaches after bluetoothd's immediate MTU exchange and keeps MTU 23. bluetoothd
+  can't delay or repeat the exchange, so `hdl/att.rs` runs its own ATT client on an L2CAP
+  socket (CID 4); with a client ATT socket on the link the kernel doesn't give the ATT channel
+  to bluetoothd. Discovery first, then the MTU exchange (like an Android central): MTU 517,
+  weave packets 509, indications fine. The phone also sends us discovery requests on that
+  bearer (`08 0100 ffff 002a`), answered with Attribute Not Found. A fixed-channel connect()
+  returns at once; the socket is usable once `send_mtu()` succeeds. Same file, same phone:
+  weave connected → Accept prompt 1.3 s (bluetoothd path: 5.5 s), start → prompt 8.4 s (12.3 s).
+  The remaining ~6 s is LE link setup, the same on both paths. `QSD_WEAVE_ATT=0` uses
+  bluetoothd (20-byte packets), which is also the fallback.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -195,6 +208,6 @@ with matching PIN), using `hdl/gatt_client.rs` (now `quickshare-direct send`, `h
 3. Bandwidth upgrade hosted by the laptop: WIFI_HOTSPOT (done), WIFI_DIRECT (optional).
 4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case. (done)
 5. App integration: desktop notification when a file arrives, with an "Open folder" action.
-6. Sending works (`quickshare-direct send`, file manager entry). Next: larger weave MTU
-   (handshake ~5 s at 20-byte packets), text/URL payloads, folders, waking a phone that isn't on
-   its Receive screen (the "device nearby is sharing" beacon).
+6. Sending works (`quickshare-direct send`, file manager entry, weave at MTU 517). Next: LE link
+   setup ~6 s (scan/connection parameters?), text/URL payloads, folders, waking a phone that isn't
+   on its Receive screen (the "device nearby is sharing" beacon).
