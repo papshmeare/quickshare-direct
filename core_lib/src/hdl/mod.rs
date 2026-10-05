@@ -20,6 +20,10 @@ mod gatt;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
 pub use gatt::*;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
+mod gatt_client;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+pub use gatt_client::*;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
 mod hotspot;
 #[cfg(all(feature = "experimental", target_os = "linux"))]
 pub use hotspot::*;

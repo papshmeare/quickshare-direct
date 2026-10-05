@@ -123,6 +123,39 @@ AP only). Wi-Fi power save on the station made no measurable difference.
   an adb shell; bursts to 16 MB/s, long stalls). Two air hops on one channel plus router behaviour:
   far below the direct VHT80 link (33-37 MB/s). Keep preferring Wi-Fi Direct.
 
+## 2026-10-05: sending from Linux over BLE (spike)
+
+First file sent laptop → Pixel 10 with no shared Wi-Fi (7.9 kB PNG, md5 identical, phone prompt
+with matching PIN). `core_lib/examples/ble_send.rs <file> [name]`, using `hdl/gatt_client.rs`.
+
+- **Discovery.** With the Quick Share Receive screen open ("Temporarily visible to everyone") the
+  phone advertises 0xFEF3 service data in the same format as our receiver (endpoint id, plaintext
+  name, its BR/EDR MAC), extended + legacy, connectable, `isPrivateGatt=true`. Its advertising
+  mediums don't include Bluetooth Classic (`advertisingMediums=[8,3,6,5,11,9,4,7]`), so BLE is the
+  way in. The address is random and rotates; BlueZ's cache keeps stale entries, so only devices
+  with an RSSI (seen in the current scan) count.
+- **GATT.** Service 0xFEF3 with weave `…0101` (write) and `…0102` (**indicate**), plus a second
+  0xFEF3 service with advertisement slots `00000000-0000-3000-8000-00000000000{0..4}`. The service
+  only shows on a connection made through the current advertising set; a link left from an earlier
+  set lists GAP/GATT only, so the client always reconnects fresh.
+- **Weave client.** We send CONN_REQUEST (counter 0), the phone confirms, then the BLE-socket
+  INTRODUCTION control frame `00 00 00 | 08 01 12 07 0a 03 fc9f5e 10 02`, then `[fc9f5e][len][frame]`
+  data. BlueZ sends our packets as Write Command even though the characteristic only lists `write`;
+  the phone accepts that.
+- **MTU.** Indications from the phone over 20 bytes fail on its side with `failed with status 133`
+  (`BleSocketOutputStream failed to write data`), although btmon shows a 517 MTU exchange and
+  BlueZ confirming every indication. Likely the private GATT server doesn't pick up the MTU
+  BlueZ exchanged right after connecting. Workaround: weave packet size 20 (the minimum), about
+  1-2 s per handshake step. Open: get the phone to use a larger MTU.
+- **Outbound fix.** rQuickShare's sender sent its encrypted PairedKeyEncryption right after the
+  connection responses; the phone only switches its channel to encrypted ~30 ms later, discarded
+  the frames ("invalid OfflineFrame … invalid tag (zero)") and then failed on "Incorrect sequence
+  number". The sender now sends its PairedKeyEncryption when the phone's arrives.
+- **Upgrade.** As receiver the phone initiates the bandwidth upgrade: it offered WIFI_LAN with its
+  own ip:port (we only list WIFI_LAN in the ConnectionRequest). Outbound ignores it, so the file
+  went over BLE. Without shared Wi-Fi the phone has to host (WIFI_DIRECT / WIFI_HOTSPOT
+  credentials) and the laptop has to join as a client: the reverse of the receive side.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -131,3 +164,5 @@ AP only). Wi-Fi power save on the station made no measurable difference.
 3. Bandwidth upgrade hosted by the laptop: WIFI_HOTSPOT (done), WIFI_DIRECT (optional).
 4. Fixed port for the WIFI_LAN upgrade listener (firewall-friendly) for the same-network case. (done)
 5. App integration: desktop notification when a file arrives, with an "Open folder" action.
+6. Sending: BLE first contact works (spike above). Next: handle the phone's upgrade offer
+   (join its Wi-Fi Direct group / hotspot as a client), larger weave MTU, `quickshare-direct send`.

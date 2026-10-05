@@ -15,7 +15,7 @@ use p256::{EncodedPoint, PublicKey};
 use prost::Message;
 use rand::Rng;
 use sha2::{Digest, Sha256, Sha512};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -59,19 +59,19 @@ pub enum OutboundPayload {
 }
 
 #[derive(Debug)]
-pub struct OutboundRequest {
+pub struct OutboundRequest<S = TcpStream> {
     endpoint_id: [u8; 4],
-    socket: TcpStream,
+    socket: S,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
 }
 
-impl OutboundRequest {
+impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
     pub fn new(
         endpoint_id: [u8; 4],
-        socket: TcpStream,
+        socket: S,
         id: String,
         sender: Sender<ChannelMessage>,
         payload: OutboundPayload,
@@ -393,20 +393,10 @@ impl OutboundRequest {
             return Err(anyhow!(format!("Connection rejected by third party",)));
         }
 
-        let paired_encryption = sharing_nearby::Frame {
-            version: Some(sharing_nearby::frame::Version::V1.into()),
-            v1: Some(sharing_nearby::V1Frame {
-                r#type: Some(sharing_nearby::v1_frame::FrameType::PairedKeyEncryption.into()),
-                paired_key_encryption: Some(sharing_nearby::PairedKeyEncryptionFrame {
-                    secret_id_hash: Some(gen_random(6)),
-                    signed_data: Some(gen_random(72)),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-        };
-
-        self.send_encrypted_frame(&paired_encryption).await?;
+        // Our PairedKeyEncryption goes out once the receiver's own one arrives (see
+        // process_paired_key_encryption_frame): the receiver only switches its channel to
+        // encrypted some ms after the connection responses, and over BLE an encrypted frame sent
+        // right away lands before that, gets discarded and desyncs the sequence numbers.
 
         Ok(())
     }
@@ -603,6 +593,22 @@ impl OutboundRequest {
         if v1_frame.paired_key_encryption.is_none() {
             return Err(anyhow!("Missing required fields"));
         }
+
+        let paired_encryption = sharing_nearby::Frame {
+            version: Some(sharing_nearby::frame::Version::V1.into()),
+            v1: Some(sharing_nearby::V1Frame {
+                r#type: Some(sharing_nearby::v1_frame::FrameType::PairedKeyEncryption.into()),
+                paired_key_encryption: Some(sharing_nearby::PairedKeyEncryptionFrame {
+                    secret_id_hash: Some(gen_random(6)),
+                    signed_data: Some(gen_random(72)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+
+        self.send_encrypted_frame(&paired_encryption).await?;
+
 
         let paired_result = sharing_nearby::Frame {
             version: Some(sharing_nearby::frame::Version::V1.into()),

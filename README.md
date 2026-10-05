@@ -21,7 +21,7 @@ Bluetooth and move the data over a direct Wi-Fi link. quickshare-direct does tha
 | Phone off Wi-Fi → Wi-Fi Direct (75 MB, ~5 MB/s) | works |
 | Phone on the same Wi-Fi → LAN | works |
 | Bluetooth Classic first contact | experimental (`QSD_BT_CLASSIC=1`) |
-| Sending from Linux | not yet (rQuickShare's sender, unchanged) |
+| Sending from Linux | BLE-only spike works (small files, slow); no Wi-Fi upgrade or CLI yet |
 
 ### Install (NixOS)
 
