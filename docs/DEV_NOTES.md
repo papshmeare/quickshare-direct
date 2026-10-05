@@ -92,6 +92,17 @@ Fixes on the way:
 - `quickshare-direct` binary: receiver + notifications (Accept/Decline with PIN, "Open folder",
   "Open" for links, "Copy" for text) via notify-send actions; tested with swaync.
 
+## 2026-10-05: faster prompt, 80 MHz link
+
+- Consent before the upgrade: the phone holds back the Introduction (file details → our prompt)
+  until an offered upgrade completes. The upgrade now runs after Accept (link prepared in the
+  background): prompt 0.4-0.5 s after the PIN instead of 5-15 s.
+- Wi-Fi Direct groups from D-Bus `GroupAdd` default to 802.11n 20 MHz (MCS 15, 144 Mbit/s,
+  ~12 MB/s). `GroupAdd` takes `ht40`/`vht`/`he` booleans: with them the group runs VHT 80 MHz,
+  234-390 Mbit/s. 75 MB in 4.4 s (~17 MB/s average, ~30 MB/s peak); phone join ~4.3 s.
+- Transfer ids were constant ("ble-weave") for BLE sessions; clients that track ids (our
+  notification daemon) skipped every transfer after the first. Now unique per session.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
