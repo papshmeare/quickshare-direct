@@ -71,8 +71,13 @@ start_p2p() {
   local dev grp ssid_bytes i
   # The P2P device functions live on the station interface's object (P2PDevice interface).
   dev=$(wpas_obj "$STA") || { echo "quickshare-ap: $STA not in wpa_supplicant" >&2; return 1; }
-  busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 2 \
-    persistent b false frequency i "$FREQ" >/dev/null || return 1
+  # Widest first: without ht40/vht/he the group runs 802.11n at 20 MHz (~144 Mbit/s, ~12 MB/s).
+  busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 5 \
+      persistent b false frequency i "$FREQ" ht40 b true vht b true he b true >/dev/null ||
+    busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 4 \
+      persistent b false frequency i "$FREQ" ht40 b true vht b true >/dev/null ||
+    busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 2 \
+      persistent b false frequency i "$FREQ" >/dev/null || return 1
   for i in $(seq 50); do
     IF=$(ls /sys/class/net | grep "^p2p-$STA-" | head -1 || true)
     [ -n "$IF" ] && GOBJ=$(wpas_obj "$IF") && break

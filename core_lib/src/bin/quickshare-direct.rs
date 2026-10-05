@@ -101,6 +101,27 @@ fn describe(meta: &TransferMetadata) -> String {
     }
 }
 
+/// Open a file/folder/URL with the desktop's default app, outside this service's process group
+/// (so the app survives service restarts) and with the user's normal PATH (a systemd user
+/// service has a minimal one, so xdg-open found Thunar's .desktop file but not `thunar`).
+fn open_detached(target: &str) {
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    if let Ok(user) = std::env::var("USER") {
+        path.push_str(&format!(":/etc/profiles/per-user/{user}/bin"));
+    }
+    path.push_str(":/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin");
+    let scoped = std::process::Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect", "xdg-open", target])
+        .env("PATH", &path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if scoped.is_err() {
+        let _ = std::process::Command::new("xdg-open").arg(target).env("PATH", &path).spawn();
+    }
+}
+
 async fn copy_to_clipboard(text: &str) {
     use tokio::io::AsyncWriteExt;
     let mut cmd = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -190,7 +211,12 @@ async fn main() -> Result<(), anyhow::Error> {
                         let _ = sender.send(ChannelMessage { id, msg: Message::Lib { action } });
                     });
                 }
+                Some(TransferState::Rejected | TransferState::Cancelled | TransferState::Disconnected) => {
+                    asked.lock().unwrap().remove(&cm.id);
+                    done.lock().unwrap().remove(&cm.id);
+                }
                 Some(TransferState::Finished) => {
+                    asked.lock().unwrap().remove(&cm.id);
                     if !done.lock().unwrap().insert(cm.id.clone()) {
                         continue;
                     }
@@ -214,7 +240,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                     .as_deref()
                                     == Some("open")
                                 {
-                                    let _ = Command::new("xdg-open").arg(&url).status().await;
+                                    open_detached(&url);
                                 }
                             }
                             _ => {
@@ -228,7 +254,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                 .as_deref()
                                     == Some("open")
                                 {
-                                    let _ = Command::new("xdg-open").arg(&dir).status().await;
+                                    open_detached(&dir.to_string_lossy());
                                 }
                             }
                         }

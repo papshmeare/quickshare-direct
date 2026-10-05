@@ -215,7 +215,11 @@ async fn weave_session(
     tokio::spawn(async move {
         let mut ir = InboundRequest::new(
             crate::hdl::MigratableStream::Ble(inbound_side),
-            "ble-weave".to_string(),
+            {
+                // Unique per session: clients track transfers by id.
+                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                format!("ble-{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1)
+            },
             isender,
         );
         ir.set_bwu_tcp_port(tcp_port);

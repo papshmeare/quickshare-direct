@@ -226,6 +226,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
 
     /// Consume the "run the bandwidth upgrade now" flag.
     pub fn take_bwu_pending(&mut self) -> bool {
+        // Upgrade only once the user accepted: the phone holds back the transfer details (and so
+        // our Accept/Decline prompt) until an offered upgrade completes, which made the PIN screen
+        // wait 5-15 s. The link is prepared in the background meanwhile (hotspot_task).
+        if self.state.state != TransferState::ReceivingFiles {
+            return false;
+        }
         #[cfg(all(feature = "experimental", target_os = "linux"))]
         if self.hotspot_task.as_ref().is_some_and(|t| t.is_finished()) {
             return true;
