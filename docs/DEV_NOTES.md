@@ -200,6 +200,18 @@ with matching PIN), using `hdl/gatt_client.rs` (now `quickshare-direct send`, `h
   The remaining ~6 s is LE link setup, the same on both paths. `QSD_WEAVE_ATT=0` uses
   bluetoothd (20-byte packets), which is also the fallback.
 
+## 2026-10-07: BLE listener no longer keeps discovery open (issue #1)
+
+rQuickShare's `BleListener` ran an unfiltered BlueZ discovery for the daemon's lifetime
+(`Discovering: yes`); on a MediaTek MT7922 that stops BlueZ's background scan from reconnecting
+bonded LE mice/keyboards. Its only use is an mDNS re-announce when a nearby device starts
+sharing (helps a phone on the same Wi-Fi a little). Now (`hdl/ble.rs`, bluer instead of btleplug):
+a passive advertisement monitor (AdvertisementMonitorManager1, pattern: service data 0xFE2C) when
+BlueZ offers it, else no scan at all. BlueZ 5.86 here (and distribution defaults) only offers the
+monitor in experimental mode (`RegisterMonitor` → UnknownMethod), so in practice: no scan.
+Verified: receiver running → `Discovering: no`. `QSD_BLE_SCAN=discovery` restores the old
+behaviour (with a warning), `QSD_BLE_SCAN=off`/`QSD_NO_BLE_SCAN` disables the listener.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle

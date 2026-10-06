@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-#[cfg(feature = "experimental")]
+#[cfg(all(feature = "experimental", target_os = "linux"))]
 use crate::hdl::BleListener;
 use crate::hdl::MDnsServer;
 use crate::manager::TcpServer;
@@ -160,10 +160,10 @@ impl RQS {
         let ctk = ctoken.clone();
         tracker.spawn(async move { server.run(ctk).await });
 
-        #[cfg(feature = "experimental")]
+        #[cfg(all(feature = "experimental", target_os = "linux"))]
         {
-            // QSD_NO_BLE_SCAN=1 (diagnostics): skip the sender-detection LE scan, which keeps the
-            // radio busy and may starve Bluetooth Classic page scan on some controllers.
+            // QSD_NO_BLE_SCAN=1: no sender detection at all (see hdl/ble.rs; QSD_BLE_SCAN picks
+            // how it watches).
             if std::env::var_os("QSD_NO_BLE_SCAN").is_some() {
                 info!("BleListener: disabled (QSD_NO_BLE_SCAN)");
             } else if let Ok(ble) = BleListener::new(self.ble_sender.clone())

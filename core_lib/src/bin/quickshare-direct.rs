@@ -12,6 +12,9 @@
 //   QSD_PORT       TCP port for incoming transfers (default: random)
 //   QSD_BWU_PORT   TCP port for the Wi-Fi upgrade (default: random)
 //   QSD_CONSENT_TIMEOUT  seconds to answer the Accept/Decline notification (default 60)
+//   QSD_BLE_SCAN   how to notice phones starting to share: default a passive BlueZ advertisement
+//                  monitor if available (else nothing); "discovery" = permanent LE discovery (can
+//                  stop bonded LE mice/keyboards from reconnecting); "off"
 //   RUST_LOG       log filter (default: info; warn for send/devices)
 //
 // Sending: `quickshare-direct send [--to NAME] FILE...` finds a phone in receive mode over
@@ -412,7 +415,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 .with_env_filter(if std::env::var("RUST_LOG").is_ok() {
                     EnvFilter::builder().from_env_lossy()
                 } else {
-                    EnvFilter::builder().parse_lossy("warn,bluez_async=error,btleplug=error")
+                    EnvFilter::builder().parse_lossy("warn")
                 })
                 .with_writer(std::io::stderr)
                 .init();
@@ -447,7 +450,7 @@ async fn main() -> Result<(), anyhow::Error> {
             EnvFilter::builder().from_env_lossy()
         } else {
             EnvFilter::builder()
-                .parse_lossy("info,mdns_sd=error,polling=error,neli=error,bluez_async=error,btleplug=error")
+                .parse_lossy("info,mdns_sd=error,polling=error,neli=error")
         })
         .init();
 
