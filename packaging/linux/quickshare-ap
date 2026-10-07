@@ -15,7 +15,11 @@
 #              QS_STA (station interface, default: first managed Wi-Fi interface),
 #              QS_AP (AP interface name, default ap0), QS_USER (user who may read the credentials;
 #              the template unit quickshare-ap@USER sets it), else QS_GROUP (group allowed to read
-#              them, default users), QS_SUBNET (default 10.42.0).
+#              them, default users), QS_SUBNET (default 10.42.0),
+#              QS_SINGLE_CHANNEL (auto, default: if the station's channel can't host the link
+#              (radar detection / no IR), disconnect the station for the transfer and host the link
+#              alone on a free channel, since many chips can't really run a group owner on a second
+#              channel; never: try the second channel anyway; always: same as auto here).
 # Needs: iw, iproute2, dnsmasq, busctl (systemd), wpa_supplicant with P2P + D-Bus (p2p), hostapd (ap).
 # NetworkManager must leave $QS_AP and p2p-<sta>-* unmanaged.
 set -euo pipefail
@@ -65,9 +69,15 @@ cleanup() {
   fw_cleanup
   [ -n "${DNSMASQ:-}" ] && kill "$DNSMASQ" 2>/dev/null || true
   [ -n "${GOBJ:-}" ] && busctl call $WPAS "$GOBJ" $WPAS.Interface.P2PDevice Disconnect 2>/dev/null || true
+  # Leave wpa_supplicant's P2P configuration as we found it (no EAPOL IP allocation).
+  if [ -n "${EAPOL_IP:-}" ] && [ -n "${DEV:-}" ]; then
+    busctl set-property $WPAS "$DEV" $WPAS.Interface.P2PDevice P2PDeviceConfig 'a{sv}' 1 \
+      IpAddrGo ay 4 0 0 0 0 2>/dev/null || true
+  fi
   [ -f "$DIR/hostapd.pid" ] && kill "$(cat "$DIR/hostapd.pid")" 2>/dev/null || true
   iw dev "$AP" del 2>/dev/null || true
   rm -f "$DIR/credentials" "$DIR/hostapd.conf" "$DIR/hostapd.pid" "$DIR/leases"
+  declare -F sta_reconnect >/dev/null && sta_reconnect
 }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
@@ -75,6 +85,7 @@ trap 'exit 0' TERM INT
 # Channel of the station connection ("channel 44 (5220 MHz), width: 160 MHz, ...").
 read -r CHAN FREQ < <(iw dev "$STA" info 2>/dev/null |
   sed -n 's/.*channel \([0-9]*\) (\([0-9]*\) MHz.*/\1 \2/p') || true
+CHAN_FROM_STA=${CHAN:+1}
 if [ -z "${CHAN:-}" ]; then CHAN=36; FREQ=5180; fi   # not connected: any non-DFS 5 GHz channel
 
 # Whether we may start a network on a frequency: listed for our phy, and not marked "radar
@@ -98,6 +109,36 @@ if ! usable "$FREQ"; then
   echo "quickshare-ap: station channel $CHAN ($FREQ MHz) needs radar detection or is no-IR; Wi-Fi Direct group on ${GO_FREQ:-a channel wpa_supplicant picks} MHz"
 fi
 
+# Single-channel fallback: the station's channel can't host the link and a group owner on a second
+# channel next to the station is invisible to phones on many chips (MediaTek MT7922: it never
+# beacons there). Leave the station network for the transfer (internet pauses for a few
+# seconds) and reconnect afterwards; NetworkManager would reconnect by itself otherwise.
+STA_DISCONNECTED=
+sta_disconnect() {
+  command -v nmcli >/dev/null || { echo "quickshare-ap: no nmcli, can't free the radio" >&2; return 1; }
+  echo "quickshare-ap: leaving the station network on $STA for the transfer (QS_SINGLE_CHANNEL=${QS_SINGLE_CHANNEL:-auto})"
+  nmcli -w 10 device disconnect "$STA" >/dev/null || return 1
+  STA_DISCONNECTED=1
+  # A disconnected station gets scanned for networks right away (all channels, ~8 s on 5 GHz with
+  # its passive DFS channels) and periodically after that, which takes the radio off the link's
+  # channel: the phone's join attempt then times out. Abort station scans while we hold the radio.
+  { stdbuf -oL iw event 2>/dev/null | while read -r line; do
+      case $line in "$STA (phy"*"scan started"*) iw dev "$STA" scan abort 2>/dev/null ;; esac
+    done; } &
+  SCAN_GUARD=$!
+  sleep 0.3; iw dev "$STA" scan abort 2>/dev/null || true
+}
+sta_reconnect() {
+  if [ -n "$STA_DISCONNECTED" ]; then
+    [ -n "${SCAN_GUARD:-}" ] && { pkill -P "$SCAN_GUARD" 2>/dev/null; kill "$SCAN_GUARD" 2>/dev/null; wait "$SCAN_GUARD" 2>/dev/null; }
+    echo "quickshare-ap: reconnecting $STA"
+    nmcli -w 0 device connect "$STA" >/dev/null 2>&1 || true
+  fi
+}
+if [ "$GO_FREQ" != "$FREQ" ] && [ "${QS_SINGLE_CHANNEL:-auto}" != never ] && [ -n "${CHAN_FROM_STA:-}" ]; then
+  sta_disconnect || true
+fi
+
 # Read a finite amount of randomness (tr < /dev/urandom | head would end in SIGPIPE + pipefail).
 rnd() { head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c "1-$1"; }
 
@@ -106,7 +147,17 @@ start_p2p() {
   local dev grp ssid_bytes i
   # The P2P device functions live on the station interface's object (P2PDevice interface).
   dev=$(wpas_obj "$STA") || { echo "quickshare-ap: $STA not in wpa_supplicant" >&2; return 1; }
+  DEV=$dev
   # Widest first: without ht40/vht/he the group runs 802.11n at 20 MHz (~144 Mbit/s, ~12 MB/s).
+  # Hand the phone its address in the WPA handshake (P2P IP address allocation in EAPOL-Key): it
+  # then needs no DHCP round, which Nearby's ~4 s join timeout doesn't always leave room for.
+  # dnsmasq stays as the fallback for .10-.99.
+  local o1 o2 o3
+  IFS=. read -r o1 o2 o3 <<< "$NET"
+  busctl set-property $WPAS "$dev" $WPAS.Interface.P2PDevice P2PDeviceConfig 'a{sv}' 4 \
+      IpAddrGo ay 4 "$o1" "$o2" "$o3" 1 IpAddrMask ay 4 255 255 255 0 \
+      IpAddrStart ay 4 "$o1" "$o2" "$o3" 100 IpAddrEnd ay 4 "$o1" "$o2" "$o3" 199 2>/dev/null &&
+    EAPOL_IP=1 || echo "quickshare-ap: no EAPOL IP allocation; phones use DHCP" >&2
   local f=() n=0
   [ -n "$GO_FREQ" ] && { f=(frequency i "$GO_FREQ"); n=1; }
   busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' $((n + 4)) \
@@ -195,7 +246,7 @@ ip link set "$IF" up
 fw_allow "$IF"
 dnsmasq --keep-in-foreground --conf-file=/dev/null --port=0 \
   --interface="$IF" --bind-interfaces --except-interface=lo \
-  --dhcp-range="$NET.10,$NET.254,255.255.255.0,1h" \
+  --dhcp-range="$NET.10,$NET.99,255.255.255.0,1h" \
   --dhcp-leasefile="$DIR/leases" &
 DNSMASQ=$!
 

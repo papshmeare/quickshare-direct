@@ -58,7 +58,11 @@ KDE, swaync, mako, ...). Ubuntu 22.04's older polkit can't let users start the h
 only Bluetooth and same-network transfers work. Set your Wi-Fi regulatory domain
 (`sudo iw reg set XX`): with the default world domain Linux won't start a group owner on 5 GHz.
 Settings: `~/.config/quickshare-direct/env` (`QSD_NAME=...`, `QSD_DIR=...`) for the receiver,
-`/etc/default/quickshare-direct` for the helpers.
+`/etc/default/quickshare-direct` for the helpers. Many Wi-Fi chips can't host the direct link on a
+second channel next to your normal connection, which matters when your router uses a channel a
+laptop may not host on (radar/DFS channels such as 100): then the laptop leaves your Wi-Fi network
+for the few seconds of the transfer and reconnects afterwards (`QS_SINGLE_CHANNEL=auto`; `always`
+for full speed when sending too, `never` to keep the connection and fall back to Bluetooth).
 
 From source: `make && sudo make install` (needs cargo ≥ 1.85, protoc, libdbus headers), then
 `systemctl --user enable --now quickshare-direct`.

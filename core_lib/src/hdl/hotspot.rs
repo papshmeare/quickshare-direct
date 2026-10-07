@@ -58,6 +58,13 @@ async fn run(cmd: &str, args: &[&str]) -> Result<String, anyhow::Error> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// The program that starts/stops the root helper units: systemctl, or QSD_SYSTEMCTL for
+/// development (tools/dev/helper-ctl.sh runs the repo's helpers through a root watcher, so helper
+/// changes can be tried without reinstalling).
+pub(crate) fn systemctl() -> String {
+    std::env::var("QSD_SYSTEMCTL").unwrap_or_else(|_| "systemctl".to_string())
+}
+
 fn iface_exists(iface: &str) -> bool {
     std::path::Path::new(&format!("/sys/class/net/{iface}")).exists()
 }
@@ -89,6 +96,9 @@ fn current_user() -> Option<String> {
 pub(crate) fn helper_unit(base: &str, env_key: &str) -> Option<String> {
     if let Ok(u) = std::env::var(env_key) {
         return Some(u);
+    }
+    if std::env::var_os("QSD_SYSTEMCTL").is_some() {
+        return Some(format!("{base}.service"));
     }
     let plain = format!("{base}.service");
     if unit_installed(&plain) {
@@ -159,7 +169,7 @@ impl Hotspot {
     async fn start_helper(unit: String) -> Result<Self, anyhow::Error> {
         let creds_path = env_or("QSD_AP_CREDENTIALS", "/run/quickshare/credentials");
         info!("{INNER_NAME}: starting {unit}");
-        run("systemctl", &["start", &unit]).await?;
+        run(&systemctl(), &["start", &unit]).await?;
         let mut creds = String::new();
         for i in 0..150 {
             if let Ok(c) = std::fs::read_to_string(&creds_path) {
@@ -171,7 +181,7 @@ impl Hotspot {
             // Give up as soon as the helper gave up (e.g. no usable channel), not after 15 s.
             if i % 5 == 4 {
                 // (is-active exits non-zero for exactly these states, so read its output.)
-                let out = Command::new("systemctl").args(["is-active", &unit]).output().await?;
+                let out = Command::new(systemctl()).args(["is-active", &unit]).output().await?;
                 let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if matches!(state.as_str(), "failed" | "inactive") {
                     bail!("{unit} {state} (see journalctl -u {unit})");
@@ -180,7 +190,7 @@ impl Hotspot {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         if creds.is_empty() {
-            let _ = run("systemctl", &["stop", &unit]).await;
+            let _ = run(&systemctl(), &["stop", &unit]).await;
             bail!("{unit} didn't write {creds_path} within 15 s (see journalctl -u {unit})");
         }
         let get = |k: &str| {
@@ -216,7 +226,7 @@ impl Hotspot {
             let u = helper_unit("quickshare-ap", "QSD_AP_UNIT")
                 .unwrap_or_else(|| "quickshare-ap.service".to_string());
             info!("{INNER_NAME}: creating {iface} via {u}");
-            run("systemctl", &["start", &u]).await?;
+            run(&systemctl(), &["start", &u]).await?;
             unit = Some(u);
             for _ in 0..20 {
                 if iface_exists(&iface) {
@@ -334,7 +344,7 @@ impl Hotspot {
                 .output();
         }
         if let Some(u) = &self.unit {
-            let _ = std::process::Command::new("systemctl")
+            let _ = std::process::Command::new(systemctl())
                 .args(["stop", u])
                 .output();
         }

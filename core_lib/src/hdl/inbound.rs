@@ -354,6 +354,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
     async fn read_encrypted_offline_frame(&mut self) -> Result<OfflineFrame, anyhow::Error> {
         let mut len_buf = [0u8; 4];
         stream_read_exact(&mut self.socket, &mut len_buf).await?;
+        self.read_encrypted_offline_frame_body(len_buf).await
+    }
+
+    /// The rest of read_encrypted_offline_frame once the length prefix has been read.
+    async fn read_encrypted_offline_frame_body(
+        &mut self,
+        len_buf: [u8; 4],
+    ) -> Result<OfflineFrame, anyhow::Error> {
         let msg_len = u32::from_be_bytes(len_buf) as usize;
         if msg_len == 0 || msg_len > SANE_FRAME_LENGTH as usize {
             return Err(anyhow!("bad frame length {msg_len}"));
@@ -1883,15 +1891,52 @@ impl InboundRequest<crate::hdl::MigratableStream> {
             Duration::from_secs(15)
         };
 
-        // Wait for the phone to connect over TCP; if it doesn't, stay on BLE.
-        let mut tcp = match tokio::time::timeout(accept_timeout, listener.accept()).await {
-            Ok(Ok((s, peer))) => {
-                info!("BWU: phone connected over TCP from {peer}");
-                s
-            }
-            _ => {
-                warn!("BWU: no TCP upgrade within timeout; staying on BLE");
-                return Ok(());
+        // Wait for the phone to connect over TCP; if it doesn't, stay on BLE. Keep reading the
+        // BLE channel meanwhile: a phone that can't join reports UPGRADE_FAILURE (after ~10 s)
+        // and we stop waiting right away. The length prefix is read with cancel-safe single
+        // reads (as in handle()), so a TCP accept winning the race loses no bytes.
+        let deadline = tokio::time::Instant::now() + accept_timeout;
+        let mut tcp = loop {
+            tokio::select! {
+                r = listener.accept() => match r {
+                    Ok((s, peer)) => {
+                        info!("BWU: phone connected over TCP from {peer}");
+                        break s;
+                    }
+                    Err(e) => {
+                        warn!("BWU: accept failed ({e}); staying on BLE");
+                        return Ok(());
+                    }
+                },
+                _ = tokio::time::sleep_until(deadline) => {
+                    warn!("BWU: no TCP upgrade within timeout; staying on BLE");
+                    return Ok(());
+                }
+                n = self.socket.read(&mut self.len_buf[self.len_have..]) => {
+                    let n = n?;
+                    if n == 0 {
+                        return Err(anyhow!(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+                    }
+                    self.len_have += n;
+                    if self.len_have < 4 {
+                        continue;
+                    }
+                    self.len_have = 0;
+                    let offline = self.read_encrypted_offline_frame_body(self.len_buf).await?;
+                    let event = offline
+                        .v1
+                        .as_ref()
+                        .and_then(|v| v.bandwidth_upgrade_negotiation.as_ref())
+                        .map(|b| b.event_type());
+                    match event {
+                        Some(EventType::UpgradeFailure) => {
+                            warn!("BWU: the phone couldn't join the upgrade link; staying on BLE");
+                            return Ok(());
+                        }
+                        Some(other) => debug!("BWU: event {other:?} while waiting for the phone"),
+                        None => self.process_offline_frame(offline).await?,
+                    }
+                }
             }
         };
 

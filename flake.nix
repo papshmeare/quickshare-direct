@@ -82,6 +82,16 @@
               default = null;
               description = "Download folder (default: the user's XDG Downloads).";
             };
+            singleChannel = lib.mkOption {
+              type = lib.types.enum [ "auto" "always" "never" ];
+              default = "auto";
+              description = ''
+                When the direct Wi-Fi link would need a second channel next to the normal Wi-Fi
+                connection (many chips can't host one there, others are slow): auto = leave the
+                Wi-Fi network for the transfer only when there's no other way (internet pauses for
+                a few seconds), always = whenever the channels differ (full speed), never = don't.
+              '';
+            };
             classicBluetooth = lib.mkOption {
               type = lib.types.bool;
               default = false;
@@ -96,8 +106,8 @@
             # Root helper: creates/removes the direct Wi-Fi link on demand.
             systemd.services.quickshare-ap = {
               description = "Temporary direct Wi-Fi link for Quick Share transfers";
-              path = with pkgs; [ iw iproute2 hostapd dnsmasq gawk gnused gnugrep coreutils systemd nftables ];
-              environment = { QS_STA = cfg.wifiInterface; QS_AP = "ap0"; QS_GROUP = "users"; QS_MODE = cfg.mode; };
+              path = with pkgs; [ iw iproute2 hostapd dnsmasq gawk gnused gnugrep coreutils systemd nftables networkmanager procps ];
+              environment = { QS_STA = cfg.wifiInterface; QS_AP = "ap0"; QS_GROUP = "users"; QS_MODE = cfg.mode; QS_SINGLE_CHANNEL = cfg.singleChannel; };
               serviceConfig = {
                 Type = "simple";
                 ExecStart = "${pkgs.bash}/bin/bash ${pkg}/libexec/quickshare-ap";
@@ -110,8 +120,8 @@
             # station interface (qsc0) with the credentials the sender writes to its runtime dir.
             systemd.services.quickshare-join = {
               description = "Join a phone's Wi-Fi Direct group for a Quick Share transfer";
-              path = with pkgs; [ iw iproute2 busybox gawk gnused coreutils systemd ];
-              environment = { QS_STA = cfg.wifiInterface; QS_CLI = "qsc0"; QS_GROUP = "users"; QS_USER = cfg.user; };
+              path = with pkgs; [ iw iproute2 busybox gawk gnused coreutils systemd networkmanager procps ];
+              environment = { QS_STA = cfg.wifiInterface; QS_CLI = "qsc0"; QS_GROUP = "users"; QS_USER = cfg.user; QS_SINGLE_CHANNEL = cfg.singleChannel; };
               serviceConfig = {
                 Type = "simple";
                 ExecStart = "${pkgs.bash}/bin/bash ${pkg}/libexec/quickshare-join";

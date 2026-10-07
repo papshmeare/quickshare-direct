@@ -49,7 +49,7 @@ pub struct JoinGuard {
 impl Drop for JoinGuard {
     fn drop(&mut self) {
         info!("{INNER_NAME}: leaving ({})", self.iface);
-        let _ = std::process::Command::new("systemctl")
+        let _ = std::process::Command::new(crate::hdl::hotspot::systemctl())
             .args(["stop", &self.unit])
             .output();
     }
@@ -83,7 +83,7 @@ pub async fn join_network(
     }
 
     info!("{INNER_NAME}: joining {ssid} ({frequency} MHz) via {unit}");
-    let started = Command::new("systemctl").args(["start", &unit]).output().await;
+    let started = Command::new(crate::hdl::hotspot::systemctl()).args(["start", &unit]).output().await;
     let joined = async {
         let out = started?;
         if !out.status.success() {
@@ -96,7 +96,7 @@ pub async fn join_network(
                     return Ok((iface.to_string(), ip.parse::<Ipv4Addr>()?));
                 }
             }
-            let state = Command::new("systemctl").args(["is-active", &unit]).output().await?;
+            let state = Command::new(crate::hdl::hotspot::systemctl()).args(["is-active", &unit]).output().await?;
             let state = String::from_utf8_lossy(&state.stdout).trim().to_string();
             if state == "failed" || state == "inactive" {
                 bail!("{unit} {state} (see journalctl -u {unit})");
@@ -113,7 +113,7 @@ pub async fn join_network(
             Ok(JoinGuard { unit, iface, ip })
         }
         Err(e) => {
-            let _ = Command::new("systemctl").args(["stop", &unit]).output().await;
+            let _ = Command::new(crate::hdl::hotspot::systemctl()).args(["stop", &unit]).output().await;
             Err(e)
         }
     }

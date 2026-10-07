@@ -225,6 +225,33 @@ the station (#channels <= 2 with P2P-GO). The hotspot fallback needs the station
 now fails at once in that case, and the receiver stops waiting as soon as the helper unit fails
 (it used to wait the full 15 s). Credentials report the group's real frequency.
 
+## 2026-10-07: single-channel fallback, scan guard, faster give-up
+
+Follow-up to the DFS case. With the station on channel 100 the group came up on 5180, but phones
+never saw it (8 phone scans, no `DIRECT-…`; a 2.4 GHz group next to the 5 GHz station likewise):
+the MT7922 reports a P2P-GO on a second channel but never beacons there. As a *client* on a second
+channel it works, slowly (sending: phone group on 5765/5805, 2.5-3.5 MB/s instead of ~36).
+- `QS_SINGLE_CHANNEL` (helpers; NixOS `singleChannel`): auto (default) = receive: if the station
+  channel can't host the link, `nmcli device disconnect` the station for the transfer and host the
+  group alone on 5180; send: join next to the station first, and only if that fails disconnect and
+  retry; always = disconnect whenever the channels differ (full speed); never.
+- Disconnecting made NetworkManager scan all channels (`iw event`: 8 s, 35.5-43.6), which took the
+  radio off channel 36 exactly while the phone associated and DHCP'd: Nearby gives a join attempt
+  ~4-5 s (associate + DHCP), so it failed, and the next attempt after the scan worked. The helpers
+  now abort station scans (`iw event` → `iw dev STA scan abort`) while they hold the radio.
+  Result: phone joins on the first attempt, offer → TCP 4.1 s, 480 KB photo done in 4.6 s, station
+  back 0.4 s after (internet paused ~6 s). Before: ~2 min over Bluetooth.
+- The receiver keeps reading the Bluetooth channel while waiting for the phone's TCP connection and
+  stops at the phone's UPGRADE_FAILURE (it waited the full 30 s before).
+- The group owner also offers P2P IP address allocation in EAPOL-Key (P2PDeviceConfig IpAddrGo..,
+  pool .100-.199, dnsmasq keeps .10-.99); this Pixel doesn't use it (joins with credentials,
+  "provisioning mode: 0") and DHCPs anyway.
+- Dev loop without reinstalling: `sudo tools/dev/helper-watch.sh` + dev build with
+  `QSD_SYSTEMCTL=tools/dev/helper-ctl.sh` runs the repo's helpers. `tools/dev/p2p-go-test.sh FREQ`
+  starts a bare group owner for scan tests.
+- Seen once after many Wi-Fi mode switches: BlueZ refused discovery (`InProgress`) with nothing
+  discovering; `bluetoothctl power off/on` fixed it.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -236,3 +263,5 @@ now fails at once in that case, and the receiver stops waiting as soon as the he
 6. Sending works (`quickshare-direct send`, file manager entry, weave at MTU 517). Next: LE link
    setup ~6 s (scan/connection parameters?), text/URL payloads, folders, waking a phone that isn't
    on its Receive screen (the "device nearby is sharing" beacon).
+7. BLE L2CAP (connection-oriented channels) as a faster Bluetooth path when no Wi-Fi link works
+   (phones list BLE_L2CAP among their upgrade mediums).

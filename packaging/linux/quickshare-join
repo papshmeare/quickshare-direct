@@ -13,6 +13,7 @@
 # Everything is removed when the service stops.
 #
 # Environment: QS_USER (required; the template unit quickshare-join@USER sets it),
+#              QS_SINGLE_CHANNEL (auto/always/never, see below),
 #              QS_STA (station interface, default: first managed interface), QS_CLI (default qsc0),
 #              QS_REQUEST.
 # Needs: iw, iproute2, busctl (systemd), wpa_supplicant with D-Bus; busybox (udhcpc) optional
@@ -43,9 +44,43 @@ cleanup() {
   [ -n "${IOBJ:-}" ] && busctl call $WPAS /fi/w1/wpa_supplicant1 $WPAS RemoveInterface o "$IOBJ" 2>/dev/null || true
   iw dev "$CLI" del 2>/dev/null || true
   rm -f "$DIR/joined" "$DIR/udhcpc.sh"
+  sta_reconnect
+}
+# Single-channel fallback (QS_SINGLE_CHANNEL): the phone's group usually runs on another channel
+# than our station network. Joining it on a second channel works on most chips but halves the
+# speed or worse (MT7922: 2.5 instead of ~36 MB/s), and fails on some. auto (default): try next
+# to the station first, and if that fails leave the station network for the transfer and retry;
+# always: leave it up front whenever the channels differ (full speed); never: don't touch it.
+SINGLE=${QS_SINGLE_CHANNEL:-auto}
+STA_DISCONNECTED=
+sta_disconnect() {
+  command -v nmcli >/dev/null || { echo "quickshare-join: no nmcli, can't free the radio" >&2; return 1; }
+  echo "quickshare-join: leaving the station network on $STA for the transfer (QS_SINGLE_CHANNEL=$SINGLE)"
+  nmcli -w 10 device disconnect "$STA" >/dev/null || return 1
+  STA_DISCONNECTED=1
+  # A disconnected station gets scanned for networks right away (all channels, ~8 s on 5 GHz with
+  # its passive DFS channels) and periodically after that, which takes the radio off the link's
+  # channel: the phone's join attempt then times out. Abort station scans while we hold the radio.
+  { stdbuf -oL iw event 2>/dev/null | while read -r line; do
+      case $line in "$STA (phy"*"scan started"*) iw dev "$STA" scan abort 2>/dev/null ;; esac
+    done; } &
+  SCAN_GUARD=$!
+  sleep 0.3; iw dev "$STA" scan abort 2>/dev/null || true
+}
+sta_reconnect() {
+  if [ -n "$STA_DISCONNECTED" ]; then
+    [ -n "${SCAN_GUARD:-}" ] && { pkill -P "$SCAN_GUARD" 2>/dev/null; kill "$SCAN_GUARD" 2>/dev/null; wait "$SCAN_GUARD" 2>/dev/null; }
+    echo "quickshare-join: reconnecting $STA"
+    nmcli -w 0 device connect "$STA" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
+
+STA_FREQ=$(iw dev "$STA" info 2>/dev/null | sed -n 's/.*channel [0-9]* (\([0-9]*\) MHz.*/\1/p' || true)
+OTHER_CHANNEL=
+[ -n "$STA_FREQ" ] && [ -n "$FREQ" ] && [ "$STA_FREQ" != "$FREQ" ] && OTHER_CHANNEL=1
+[ "$SINGLE" = always ] && [ -n "$OTHER_CHANNEL" ] && { sta_disconnect || true; }
 
 iw dev "$CLI" del 2>/dev/null || true
 iw dev "$STA" interface add "$CLI" type managed
@@ -62,12 +97,20 @@ else
 fi
 busctl call $WPAS "$IOBJ" $WPAS.Interface SelectNetwork o "$NOBJ"
 
-for i in $(seq 150); do
-  [ "$(busctl get-property $WPAS "$IOBJ" $WPAS.Interface State)" = 's "completed"' ] && break
-  sleep 0.1
-done
-[ "$(busctl get-property $WPAS "$IOBJ" $WPAS.Interface State)" = 's "completed"' ] ||
-  { echo "quickshare-join: couldn't join $SSID" >&2; exit 1; }
+joined() { [ "$(busctl get-property $WPAS "$IOBJ" $WPAS.Interface State)" = 's "completed"' ]; }
+wait_joined() { # tenths of a second
+  local n
+  for ((n = 0; n < $1; n++)); do joined && return 0; sleep 0.1; done
+  joined
+}
+if ! wait_joined "$( [ "$SINGLE" = auto ] && [ -n "$OTHER_CHANNEL" ] && [ -z "$STA_DISCONNECTED" ] && echo 60 || echo 150)"; then
+  if [ "$SINGLE" = auto ] && [ -n "$OTHER_CHANNEL" ] && [ -z "$STA_DISCONNECTED" ] && sta_disconnect; then
+    busctl call $WPAS "$IOBJ" $WPAS.Interface SelectNetwork o "$NOBJ"
+    wait_joined 100 || { echo "quickshare-join: couldn't join $SSID" >&2; exit 1; }
+  else
+    echo "quickshare-join: couldn't join $SSID" >&2; exit 1
+  fi
+fi
 
 # Address from the phone's DHCP server; a fixed one in the gateway's /24 if that doesn't answer.
 cat > "$DIR/udhcpc.sh" <<'EOF'
@@ -89,7 +132,7 @@ printf 'iface=%s\nip=%s\n' "$CLI" "$IP" > "$DIR/joined.tmp"
 chgrp "$GROUP" "$DIR/joined.tmp" "$DIR"
 chmod 0750 "$DIR"
 mv "$DIR/joined.tmp" "$DIR/joined"
-echo "quickshare-join: joined $SSID on $CLI ($FREQ MHz) as $IP, next to $STA"
+echo "quickshare-join: joined $SSID on $CLI ($FREQ MHz) as $IP, next to $STA (${STA_FREQ:-no} MHz${STA_DISCONNECTED:+, disconnected for the transfer})"
 
 # Stay up until the sender stops the service.
 while :; do sleep 3600 & wait $!; done
