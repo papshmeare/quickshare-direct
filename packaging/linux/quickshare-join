@@ -40,6 +40,7 @@ case $GW in *[!0-9.]*) GW= ;; esac
 
 WPAS=fi.w1.wpa_supplicant1
 cleanup() {
+  set +e  # finish every step, above all the station reconnect
   [ -n "${DHCP:-}" ] && kill "$DHCP" 2>/dev/null || true
   [ -n "${IOBJ:-}" ] && busctl call $WPAS /fi/w1/wpa_supplicant1 $WPAS RemoveInterface o "$IOBJ" 2>/dev/null || true
   iw dev "$CLI" del 2>/dev/null || true
@@ -56,22 +57,34 @@ STA_DISCONNECTED=
 sta_disconnect() {
   command -v nmcli >/dev/null || { echo "quickshare-join: no nmcli, can't free the radio" >&2; return 1; }
   echo "quickshare-join: leaving the station network on $STA for the transfer (QS_SINGLE_CHANNEL=$SINGLE)"
+  # Remember exactly which connection was up, to bring back that one (not just any network).
+  STA_CONN=$(nmcli -g UUID,DEVICE connection show --active 2>/dev/null |
+    awk -F: -v d="$STA" '$2 == d { print $1; exit }')
   nmcli -w 10 device disconnect "$STA" >/dev/null || return 1
   STA_DISCONNECTED=1
+  # If we die before reconnecting, the unit's ExecStopPost reconnects from this marker.
+  echo "$STA_CONN" > "/run/quickshare-reconnect-$STA"
   # A disconnected station gets scanned for networks right away (all channels, ~8 s on 5 GHz with
   # its passive DFS channels) and periodically after that, which takes the radio off the link's
   # channel: the phone's join attempt then times out. Abort station scans while we hold the radio.
   { stdbuf -oL iw event 2>/dev/null | while read -r line; do
       case $line in "$STA (phy"*"scan started"*) iw dev "$STA" scan abort 2>/dev/null ;; esac
-    done; } &
+    done; } 2>/dev/null &
   SCAN_GUARD=$!
+  disown "$SCAN_GUARD" 2>/dev/null || true  # no "Terminated" job report when we stop it
   sleep 0.3; iw dev "$STA" scan abort 2>/dev/null || true
 }
 sta_reconnect() {
   if [ -n "$STA_DISCONNECTED" ]; then
-    [ -n "${SCAN_GUARD:-}" ] && { pkill -P "$SCAN_GUARD" 2>/dev/null; kill "$SCAN_GUARD" 2>/dev/null; wait "$SCAN_GUARD" 2>/dev/null; }
-    echo "quickshare-join: reconnecting $STA"
-    nmcli -w 0 device connect "$STA" >/dev/null 2>&1 || true
+    if [ -n "${SCAN_GUARD:-}" ]; then
+      pkill -P "$SCAN_GUARD" 2>/dev/null; kill "$SCAN_GUARD" 2>/dev/null
+      sleep 0.2  # let the last scan abort land before NetworkManager rescans to reconnect
+    fi
+    echo "quickshare-join: reconnecting $STA${STA_CONN:+ (connection $STA_CONN)}"
+    if [ -z "$STA_CONN" ] || ! nmcli -w 0 connection up uuid "$STA_CONN" ifname "$STA" >/dev/null 2>&1; then
+      nmcli -w 0 device connect "$STA" >/dev/null 2>&1 || true
+    fi
+    rm -f "/run/quickshare-reconnect-$STA"
   fi
 }
 trap cleanup EXIT

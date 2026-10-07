@@ -25,6 +25,7 @@ finish() { # base status
   local b=$1
   case $b in quickshare-ap) iw dev ap0 del 2>/dev/null ;; quickshare-join) iw dev qsc0 del 2>/dev/null ;; esac
   rm -rf "$(rundir "$b")"
+  sh "$REPO/packaging/linux/quickshare-reconnect"
   unset "PID[$b]"
   setstate "$b" "$2"
   echo "[watch] $b $2"

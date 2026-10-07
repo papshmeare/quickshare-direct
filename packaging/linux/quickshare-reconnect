@@ -1,0 +1,15 @@
+#!/bin/sh
+# quickshare-reconnect: safety net run when a quickshare helper unit stops (ExecStopPost). A helper
+# that left the Wi-Fi network for a transfer (QS_SINGLE_CHANNEL) leaves a marker
+# /run/quickshare-reconnect-<interface>; if it died before reconnecting, reconnect here.
+for f in /run/quickshare-reconnect-*; do
+  [ -e "$f" ] || continue
+  ifname=${f#/run/quickshare-reconnect-}
+  uuid=$(cat "$f" 2>/dev/null)
+  echo "quickshare-reconnect: reconnecting $ifname${uuid:+ (connection $uuid)}"
+  if [ -z "$uuid" ] || ! nmcli -w 0 connection up uuid "$uuid" ifname "$ifname" >/dev/null 2>&1; then
+    nmcli -w 0 device connect "$ifname" >/dev/null 2>&1 || true
+  fi
+  rm -f "$f"
+done
+exit 0

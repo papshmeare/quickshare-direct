@@ -9,5 +9,6 @@ Environment=QS_USER=%i
 EnvironmentFile=-/etc/default/quickshare-direct
 ExecStart=@LIBEXECDIR@/quickshare-ap
 ExecStopPost=-/bin/sh -c 'iw dev ap0 del 2>/dev/null'
+ExecStopPost=-@LIBEXECDIR@/quickshare-reconnect
 RuntimeDirectory=quickshare
 RuntimeDirectoryMode=0750

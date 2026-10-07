@@ -132,7 +132,7 @@ case $FORMAT in
       $SUDO install -Dm"$3" "$1" "$2" && echo "$2" >> "$LIST"
     }
     put "$ROOT/usr/bin/quickshare-direct" /usr/local/bin/quickshare-direct 755
-    for f in quickshare-ap quickshare-join quickshare-bt-setup; do
+    for f in quickshare-ap quickshare-join quickshare-bt-setup quickshare-reconnect; do
       put "$ROOT/usr/lib/quickshare-direct/$f" "/usr/local/lib/quickshare-direct/$f" 755
     done
     for f in "$ROOT"/usr/lib/systemd/system/*; do

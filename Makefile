@@ -39,6 +39,7 @@ install:
 	install -Dm755 $(PKG)/quickshare-ap $(DESTDIR)$(LIBEXECDIR)/quickshare-ap
 	install -Dm755 $(PKG)/quickshare-join $(DESTDIR)$(LIBEXECDIR)/quickshare-join
 	install -Dm755 $(PKG)/quickshare-bt-setup $(DESTDIR)$(LIBEXECDIR)/quickshare-bt-setup
+	install -Dm755 $(PKG)/quickshare-reconnect $(DESTDIR)$(LIBEXECDIR)/quickshare-reconnect
 	install -d $(DESTDIR)$(SYSTEMDSYSTEMUNITDIR) $(DESTDIR)$(SYSTEMDUSERUNITDIR)
 	$(call install_subst,$(PKG)/systemd/quickshare-ap@.service,$(DESTDIR)$(SYSTEMDSYSTEMUNITDIR)/quickshare-ap@.service)
 	$(call install_subst,$(PKG)/systemd/quickshare-join@.service,$(DESTDIR)$(SYSTEMDSYSTEMUNITDIR)/quickshare-join@.service)

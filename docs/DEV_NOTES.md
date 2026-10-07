@@ -276,6 +276,16 @@ it when a PSM is advertised and falls back to weave (QSD_BLE_L2CAP=0 forces weav
 - With Wi-Fi: L2CAP handshake, then the phone's Wi-Fi Direct group: 30 MB at 6.8 MB/s (joined on a
   second channel next to the station on channel 100).
 
+## 2026-10-08: reconnect after the single-channel fallback
+
+A real receive left the laptop off its Wi-Fi: the helper's cleanup ran under `set -e`, and the
+`wait` on the killed scan guard returned non-zero and ended it before `nmcli … connect`. Now the
+cleanup runs with `set +e`, the helper restores the exact connection it left (its UUID, via
+`nmcli connection up uuid … ifname …`; `device connect` could pick another saved network), and
+a marker `/run/quickshare-reconnect-<iface>` lets the units' ExecStopPost
+(packaging/linux/quickshare-reconnect) reconnect even if the helper dies. The guard is disowned
+and its pipeline's stderr silenced (no "Terminated" in the logs).
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle

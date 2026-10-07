@@ -27,6 +27,7 @@
             install -Dm755 ${./packaging/linux/quickshare-ap} $out/libexec/quickshare-ap
             install -Dm755 ${./packaging/linux/quickshare-join} $out/libexec/quickshare-join
             install -Dm755 ${./packaging/linux/quickshare-bt-setup} $out/libexec/quickshare-bt-setup
+            install -Dm755 ${./packaging/linux/quickshare-reconnect} $out/libexec/quickshare-reconnect
             patchShebangs $out/libexec
             # "Send with Quick Share" in the file manager's Open With menu.
             install -Dm644 ${./packaging/linux/quickshare-direct-send.desktop} \
@@ -121,7 +122,7 @@
               serviceConfig = {
                 Type = "simple";
                 ExecStart = "${pkgs.bash}/bin/bash ${pkg}/libexec/quickshare-ap";
-                ExecStopPost = "-${pkgs.iw}/bin/iw dev ap0 del";
+                ExecStopPost = [ "-${pkgs.iw}/bin/iw dev ap0 del" "-${pkgs.bash}/bin/sh ${pkg}/libexec/quickshare-reconnect" ];
                 RuntimeDirectory = "quickshare";
                 RuntimeDirectoryMode = "0750";
               };
@@ -135,7 +136,7 @@
               serviceConfig = {
                 Type = "simple";
                 ExecStart = "${pkgs.bash}/bin/bash ${pkg}/libexec/quickshare-join";
-                ExecStopPost = "-${pkgs.iw}/bin/iw dev qsc0 del";
+                ExecStopPost = [ "-${pkgs.iw}/bin/iw dev qsc0 del" "-${pkgs.bash}/bin/sh ${pkg}/libexec/quickshare-reconnect" ];
                 RuntimeDirectory = "quickshare-join";
                 RuntimeDirectoryMode = "0750";
               };
