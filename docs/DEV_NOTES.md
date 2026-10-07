@@ -212,6 +212,19 @@ monitor in experimental mode (`RegisterMonitor` → UnknownMethod), so in practi
 Verified: receiver running → `Discovering: no`. `QSD_BLE_SCAN=discovery` restores the old
 behaviour (with a warning), `QSD_BLE_SCAN=off`/`QSD_NO_BLE_SCAN` disables the listener.
 
+## 2026-10-07: station on a DFS channel → no Wi-Fi Direct group
+
+On a new network (router on channel 100, 5500 MHz, DFS in EE) a receive stayed on Bluetooth
+(147 KB in ~39 s): `GroupAdd` with frequency 5500 → "Did not receive correct message arguments"
+for all three variants, and the hotspot fallback can't start there either (hostapd: channel not
+in the list). A group owner/AP is a master device and must do its own radar detection on DFS
+channels; the station side is the router's job. The helper now checks `iw phy` for the station
+frequency and, if it's marked radar detection / no-IR / disabled, puts the group on the first
+usable channel (5180…5240, 5745…5805, then 2.4 GHz); the chip runs it on a second channel next to
+the station (#channels <= 2 with P2P-GO). The hotspot fallback needs the station's channel and
+now fails at once in that case, and the receiver stops waiting as soon as the helper unit fails
+(it used to wait the full 15 s). Credentials report the group's real frequency.
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle

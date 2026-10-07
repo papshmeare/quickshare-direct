@@ -77,6 +77,27 @@ read -r CHAN FREQ < <(iw dev "$STA" info 2>/dev/null |
   sed -n 's/.*channel \([0-9]*\) (\([0-9]*\) MHz.*/\1 \2/p') || true
 if [ -z "${CHAN:-}" ]; then CHAN=36; FREQ=5180; fi   # not connected: any non-DFS 5 GHz channel
 
+# Whether we may start a network on a frequency: listed for our phy, and not marked "radar
+# detection" (DFS), "no IR" or "disabled" (iw phy: "* 5500.0 MHz [100] (26.0 dBm) (radar detection)").
+PHY=$(cat "/sys/class/net/$STA/phy80211/name" 2>/dev/null || true)
+PHYINFO=$(iw phy ${PHY:+"$PHY"} info 2>/dev/null || iw phy 2>/dev/null || true)
+usable() {
+  local l
+  l=$(printf '%s\n' "$PHYINFO" | grep -E "^[[:space:]]+\* $1(\.0)? MHz" | head -1)
+  [ -n "$l" ] && ! printf '%s\n' "$l" | grep -qE "radar detection|no IR|disabled"
+}
+# The Wi-Fi Direct group goes on the station's channel when it can; a station on a DFS channel
+# (e.g. 100) can't host one, so the group takes the first usable channel instead (the chip runs it
+# on a second channel next to the station). A plain hotspot must share the station's channel.
+GO_FREQ=$FREQ
+if ! usable "$FREQ"; then
+  GO_FREQ=
+  for f in 5180 5200 5220 5240 5745 5765 5785 5805 2437 2412 2462; do
+    if usable "$f"; then GO_FREQ=$f; break; fi
+  done
+  echo "quickshare-ap: station channel $CHAN ($FREQ MHz) needs radar detection or is no-IR; Wi-Fi Direct group on ${GO_FREQ:-a channel wpa_supplicant picks} MHz"
+fi
+
 # Read a finite amount of randomness (tr < /dev/urandom | head would end in SIGPIPE + pipefail).
 rnd() { head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c "1-$1"; }
 
@@ -86,12 +107,14 @@ start_p2p() {
   # The P2P device functions live on the station interface's object (P2PDevice interface).
   dev=$(wpas_obj "$STA") || { echo "quickshare-ap: $STA not in wpa_supplicant" >&2; return 1; }
   # Widest first: without ht40/vht/he the group runs 802.11n at 20 MHz (~144 Mbit/s, ~12 MB/s).
-  busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 5 \
-      persistent b false frequency i "$FREQ" ht40 b true vht b true he b true >/dev/null ||
-    busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 4 \
-      persistent b false frequency i "$FREQ" ht40 b true vht b true >/dev/null ||
-    busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' 2 \
-      persistent b false frequency i "$FREQ" >/dev/null || return 1
+  local f=() n=0
+  [ -n "$GO_FREQ" ] && { f=(frequency i "$GO_FREQ"); n=1; }
+  busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' $((n + 4)) \
+      persistent b false "${f[@]}" ht40 b true vht b true he b true >/dev/null ||
+    busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' $((n + 3)) \
+      persistent b false "${f[@]}" ht40 b true vht b true >/dev/null ||
+    busctl call $WPAS "$dev" $WPAS.Interface.P2PDevice GroupAdd 'a{sv}' $((n + 1)) \
+      persistent b false "${f[@]}" >/dev/null || return 1
   for i in $(seq 50); do
     IF=$(ls /sys/class/net | grep "^p2p-$STA-" | head -1 || true)
     [ -n "$IF" ] && GOBJ=$(wpas_obj "$IF") && break
@@ -107,10 +130,16 @@ start_p2p() {
   ssid_bytes=$(busctl get-property $WPAS "$grp" $WPAS.Group SSID | cut -d' ' -f3-)
   SSID=$(for b in $ssid_bytes; do printf "\\x$(printf %02x "$b")"; done)
   PASS=$(busctl get-property $WPAS "$grp" $WPAS.Group Passphrase | sed 's/^s "\(.*\)"$/\1/')
+  # The channel the group really uses (what the phone is told), e.g. "q 5180".
+  GROUP_FREQ=$(busctl get-property $WPAS "$grp" $WPAS.Group Frequency 2>/dev/null | awk '{print $2}' || true)
   [ -n "$SSID" ] && [ -n "$PASS" ]
 }
 
 start_ap() {
+if ! usable "$FREQ"; then
+  echo "quickshare-ap: no hotspot either: it would have to share the station's channel $CHAN ($FREQ MHz), which needs radar detection" >&2
+  return 1
+fi
 IF=$AP
 iw dev "$AP" del 2>/dev/null || true
 iw dev "$STA" interface add "$AP" type __ap
@@ -159,7 +188,7 @@ if [ "$MODE" = p2p ] && ! start_p2p; then
   [ -n "${GOBJ:-}" ] && busctl call $WPAS "$GOBJ" $WPAS.Interface.P2PDevice Disconnect 2>/dev/null || true
   GOBJ=; MODE=ap
 fi
-[ "$MODE" = ap ] && start_ap
+if [ "$MODE" = ap ]; then start_ap || exit 1; LINK_FREQ=$FREQ; else LINK_FREQ=${GROUP_FREQ:-${GO_FREQ:-$FREQ}}; fi
 
 ip addr add "$NET.1/24" dev "$IF"
 ip link set "$IF" up
@@ -171,11 +200,11 @@ dnsmasq --keep-in-foreground --conf-file=/dev/null --port=0 \
 DNSMASQ=$!
 
 umask 027
-printf 'mode=%s\nssid=%s\npassword=%s\nfrequency=%s\ngateway=%s\n' "$MODE" "$SSID" "$PASS" "$FREQ" "$NET.1" \
+printf 'mode=%s\nssid=%s\npassword=%s\nfrequency=%s\ngateway=%s\n' "$MODE" "$SSID" "$PASS" "$LINK_FREQ" "$NET.1" \
   > "$DIR/credentials.tmp"
 chgrp "$GROUP" "$DIR/credentials.tmp" "$DIR"
 chmod 0750 "$DIR"
 mv "$DIR/credentials.tmp" "$DIR/credentials"
-echo "quickshare-ap: $MODE $SSID on $IF, channel $CHAN ($FREQ MHz), next to $STA"
+echo "quickshare-ap: $MODE $SSID on $IF ($LINK_FREQ MHz), next to $STA (channel $CHAN, $FREQ MHz)"
 
 wait "$DNSMASQ"

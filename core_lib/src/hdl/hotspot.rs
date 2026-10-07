@@ -161,11 +161,20 @@ impl Hotspot {
         info!("{INNER_NAME}: starting {unit}");
         run("systemctl", &["start", &unit]).await?;
         let mut creds = String::new();
-        for _ in 0..150 {
+        for i in 0..150 {
             if let Ok(c) = std::fs::read_to_string(&creds_path) {
                 if c.contains("password=") {
                     creds = c;
                     break;
+                }
+            }
+            // Give up as soon as the helper gave up (e.g. no usable channel), not after 15 s.
+            if i % 5 == 4 {
+                // (is-active exits non-zero for exactly these states, so read its output.)
+                let out = Command::new("systemctl").args(["is-active", &unit]).output().await?;
+                let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if matches!(state.as_str(), "failed" | "inactive") {
+                    bail!("{unit} {state} (see journalctl -u {unit})");
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
