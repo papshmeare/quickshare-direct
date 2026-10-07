@@ -144,10 +144,13 @@ fn file_uri(path: &std::path::Path) -> String {
     s
 }
 
-/// Show the files selected in the file manager (org.freedesktop.FileManager1.ShowItems: Thunar,
-/// Nautilus, Dolphin, ...); falls back to opening the folder.
+/// Show the received files in the file manager (org.freedesktop.FileManager1.ShowItems: Thunar,
+/// Nautilus, Dolphin, ...) with the last one to finish selected; falls back to opening the folder.
+/// Only one file is passed: Thunar opens a window per item.
 async fn show_items(dir: &std::path::Path, files: &[String]) {
-    let uris: Vec<String> = files.iter().map(|f| file_uri(&dir.join(f))).collect();
+    let mtime = |f: &String| std::fs::metadata(dir.join(f)).and_then(|m| m.modified()).ok();
+    let latest = files.iter().max_by_key(|f| mtime(f));
+    let uris: Vec<String> = latest.map(|f| file_uri(&dir.join(f))).into_iter().collect();
     let mut cmd = Command::new("busctl");
     cmd.args([
         "--user", "call", "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
