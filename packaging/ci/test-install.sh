@@ -22,7 +22,7 @@ docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$DIST":/dist:ro -v "$REPO/
   quickshare-direct --help >/dev/null
   b=\$(readlink -f \$(command -v quickshare-direct)); echo \"binary: \$b\"
   case \$b in /usr/local/*) L=/usr/local/lib/quickshare-direct U=/etc/systemd ;; *) L=/usr/lib/quickshare-direct U=/usr/lib/systemd ;; esac
-  for f in \$L/quickshare-ap \$L/quickshare-join; do bash -n \"\$f\" && test -x \"\$f\"; done
+  for f in \$L/quickshare-ap \$L/quickshare-join \$L/quickshare-bt-setup; do bash -n \"\$f\" && test -x \"\$f\"; done
   for f in \$U/system/quickshare-ap@.service \$U/system/quickshare-join@.service \
            \$U/system/quickshare-bt-connectable.service \$U/user/quickshare-direct.service; do
     test -f \"\$f\" || { echo \"missing \$f\"; exit 1; }

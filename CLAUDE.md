@@ -19,7 +19,8 @@ measurements, open plan), docs/BLE_RECEIVER_DISCOVERY.md (BLE/weave protocol).
 - Sending: `hdl/send.rs` (driver), `hdl/gatt_client.rs` (discovery, weave client),
   `hdl/att.rs` (own ATT bearer on an L2CAP socket so the MTU exchange comes after the phone's
   private GATT server attaches), `hdl/outbound.rs` (sender state machine, BWU as responder),
-  `hdl/join.rs` + `packaging/linux/quickshare-join` (join the phone's Wi-Fi Direct group).
+  `hdl/join.rs` + `packaging/linux/quickshare-join` (join the phone's Wi-Fi Direct group),
+  `hdl/l2cap.rs` (BLE L2CAP channel to the phone's advertised PSM, preferred over weave).
 - `core_lib/src/bin/quickshare-direct.rs`: the daemon (notifications via notify-send actions:
   Accept/Decline with PIN, "Show in folder" via org.freedesktop.FileManager1.ShowItems).
 - `packaging/linux/quickshare-ap`: root helper (Wi-Fi Direct GO via wpa_supplicant D-Bus GroupAdd
@@ -48,7 +49,10 @@ measurements, open plan), docs/BLE_RECEIVER_DISCOVERY.md (BLE/weave protocol).
   logs `journalctl --user -u quickshare-direct`, helper logs `journalctl -u quickshare-ap`). Stop it
   before running a dev build (ports 46257/46258, BLE advertising).
 - Changes to the helper/module only take effect after pushing, `nix flake update quickshare-direct`
-  in /data/nixos-config and the owner running `nrs` (you can't sudo).
+  in /data/nixos-config and the owner running `nrs` (you can't sudo). During development use dev
+  builds instead: the owner runs `sudo tools/dev/helper-watch.sh` once, then the dev build with
+  `QSD_SYSTEMCTL=$PWD/tools/dev/helper-ctl.sh` runs the repo's helpers through it (receiver: stop
+  the installed user service first). Release + flake update + nrs only when done.
 - Test phone: Pixel 10 on USB adb (`ADB_SERIAL=...`). The Pixel drops Wi-Fi while Quick Share
   discovers devices, so wireless adb dies mid-test: use USB. `tools/dev/qs-auto.sh <image> <name>
   [receiver-log]` pushes an image, opens the share sheet → Quick Share → taps the device unless the

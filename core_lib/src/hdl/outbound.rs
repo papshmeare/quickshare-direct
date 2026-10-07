@@ -54,6 +54,7 @@ use crate::{DEVICE_NAME, location_nearby_connections, sharing_nearby};
 type HmacSha256 = Hmac<Sha256>;
 
 const SANE_FRAME_LENGTH: i32 = 5 * 1024 * 1024;
+const DEFAULT_CHUNK_SIZE: usize = 512 * 1024;
 const SANITY_DURATION: Duration = Duration::from_micros(10);
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,10 @@ pub struct OutboundRequest<S = TcpStream> {
     /// Accept, and nothing reads it while files stream (see `send_held_files`).
     hold_files_for_upgrade: bool,
     files_held: bool,
+    /// File data per payload chunk (one frame each).
+    chunk_size: usize,
+    /// On a Bluetooth link (set by the send driver, cleared by a bandwidth upgrade).
+    slow_link: bool,
     /// The receiver's Wi-Fi Direct group / hotspot we joined for the upgrade (left on drop).
     #[cfg(all(feature = "experimental", target_os = "linux"))]
     joined: Option<crate::hdl::JoinGuard>,
@@ -119,6 +124,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
             bwu_offer: None,
             hold_files_for_upgrade: false,
             files_held: false,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            slow_link: false,
             #[cfg(all(feature = "experimental", target_os = "linux"))]
             joined: None,
         }
@@ -237,6 +244,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
     }
 
     /// Whether the receiver accepted and the files wait for `send_held_files`.
+    /// File data per payload chunk. Large chunks suit TCP; a BLE L2CAP channel needs small ones
+    /// (Nearby uses 1 KB packets there and the phone stops reading when a frame is huge).
+    /// Reset to the default after a bandwidth upgrade.
+    pub fn set_chunk_size(&mut self, size: usize) {
+        self.chunk_size = size.max(256);
+    }
+
+    /// The link is Bluetooth: at the end, wait for the receiver to have everything.
+    pub fn set_slow_link(&mut self, slow: bool) {
+        self.slow_link = slow;
+    }
+
     pub fn files_held(&self) -> bool {
         self.files_held
     }
@@ -827,7 +846,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
                     // does as soon as it sees Finished), the phone loses the
                     // connection mid-finalization and reports "can't transfer files".
                     self.disconnection().await?;
-                    self.wait_for_peer_close(Duration::from_secs(5)).await;
+                    // Over Bluetooth "sent" only means buffered: the rest can take minutes to
+                    // reach the phone, which closes the link once it has everything.
+                    let grace = if self.slow_link { Duration::from_secs(300) } else { Duration::from_secs(5) };
+                    self.wait_for_peer_close(grace).await;
                     self.update_state(
                         |e| {
                             e.state = TransferState::Finished;
@@ -903,7 +925,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
                         break;
                     }
 
-                    let mut buffer = vec![0u8; 512 * 1024];
+                    let mut buffer = vec![0u8; self.chunk_size];
                     let bytes_read = curr_state.file.as_ref().unwrap().read(&mut buffer)?;
 
                     (
@@ -1638,6 +1660,8 @@ impl OutboundRequest<crate::hdl::MigratableStream> {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         self.socket = crate::hdl::MigratableStream::Tcp(tcp);
+        self.chunk_size = DEFAULT_CHUNK_SIZE;
+        self.slow_link = false;
         info!("BWU: upgraded to {:?} ({addr})", info.medium());
         for f in deferred {
             self.process_offline_frame(f).await?;

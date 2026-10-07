@@ -1,0 +1,26 @@
+#!/bin/sh
+# quickshare-bt-setup: Bluetooth settings for Quick Share, run as root when Bluetooth starts
+# (quickshare-bt-connectable.service).
+#  - Keep the adapter connectable: BlueZ keeps it off unless it's discoverable, and phones must be
+#    able to connect.
+#  - A shorter LE connection interval for the LE links the laptop opens (sending to a phone over
+#    its L2CAP channel): with the kernel's 30-50 ms default one ~250-byte packet per interval gets
+#    through, ~5 KB/s; 7.5-15 ms makes that ~40-50 KB/s. Devices that ask for their own interval
+#    (most mice/keyboards) keep theirs. QS_LE_CONN_INTERVAL="MIN MAX" in 1.25 ms units
+#    (default "6 12"), or "off".
+btmgmt connectable on >/dev/null 2>&1 || echo "quickshare-bt-setup: btmgmt connectable failed" >&2
+
+set -- ${QS_LE_CONN_INTERVAL:-6 12}
+[ "$1" = off ] && exit 0
+MIN=$1 MAX=${2:-$1}
+for d in /sys/kernel/debug/bluetooth/hci*; do
+  [ -w "$d/conn_min_interval" ] || continue
+  # Keep min <= max at every step.
+  if [ "$MIN" -le "$(cat "$d/conn_max_interval")" ]; then
+    echo "$MIN" > "$d/conn_min_interval" && echo "$MAX" > "$d/conn_max_interval"
+  else
+    echo "$MAX" > "$d/conn_max_interval" && echo "$MIN" > "$d/conn_min_interval"
+  fi
+  echo "quickshare-bt-setup: $(basename "$d") LE connection interval $MIN-$MAX ($(($MIN * 5 / 4))-$(($MAX * 5 / 4)) ms)"
+done
+exit 0

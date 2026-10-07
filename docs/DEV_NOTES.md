@@ -252,6 +252,30 @@ channel it works, slowly (sending: phone group on 5765/5805, 2.5-3.5 MB/s instea
 - Seen once after many Wi-Fi mode switches: BlueZ refused discovery (`InProgress`) with nothing
   discovering; `bluetoothctl power off/on` fixed it.
 
+## 2026-10-07: sending over BLE L2CAP; LE connection interval
+
+BLE_L2CAP isn't a bandwidth-upgrade medium (Nearby's UpgradePathInfo has no value 10); it replaces
+the GATT/weave socket for the Bluetooth leg. The receiver advertises a PSM in the extra fields of
+its 0xFEF3 BleAdvertisement (after the 2-byte device token: mask byte, bit 0 → 2-byte PSM; the
+Pixel uses 128 or 161). On the channel every message is [4-byte BE length][payload]: we send
+0x03 (request data connection), the phone answers 0x17 (ready); then the BLE socket layer as over
+weave ([00 00 00][SocketControlFrame] INTRODUCTION, data packets [fc9f5e][bytes], and a
+PACKET_ACKNOWLEDGEMENT control frame for every data packet received). `hdl/l2cap.rs`; `send` uses
+it when a PSM is advertised and falls back to weave (QSD_BLE_L2CAP=0 forces weave).
+- Link up 0.9-2.7 s (GATT: 6-7 s), PIN prompt 1.6 s after connecting.
+- A 512 KB chunk (one frame) stalls the phone (it reads one L2CAP SDU per message; 64 KB > its
+  65535 MTU also breaks); 1 KB (Nearby's own size) and 16 KB work; default 16 KB.
+- Throughput was ~5 KB/s with 1 KB or 16 KB chunks, headphones on or off: one ~250-byte packet per
+  connection event at the kernel's 30-50 ms LE connection interval (debugfs conn_min/max_interval
+  24/40). With 6/9 (7.5-11 ms): 46 KB/s (16 KB chunks), 38.5 KB/s (1 KB). The boot unit
+  (packaging/linux/quickshare-bt-setup) now sets QS_LE_CONN_INTERVAL="6 12" (NixOS
+  leConnInterval); `tools/dev/le-conn-interval.sh` shows/sets it.
+- "Sent" used to be reported once everything was buffered; over Bluetooth that's long before the
+  phone has it (a 1 MB file arrived with 734 KB). On a Bluetooth link the sender now waits up to
+  5 min for the phone to close the connection (which it does once complete).
+- With Wi-Fi: L2CAP handshake, then the phone's Wi-Fi Direct group: 30 MB at 6.8 MB/s (joined on a
+  second channel next to the station on channel 100).
+
 ## Plan
 
 1. Put the real adapter address in the advertisement; make the BLE weave server handle
@@ -263,5 +287,5 @@ channel it works, slowly (sending: phone group on 5765/5805, 2.5-3.5 MB/s instea
 6. Sending works (`quickshare-direct send`, file manager entry, weave at MTU 517). Next: LE link
    setup ~6 s (scan/connection parameters?), text/URL payloads, folders, waking a phone that isn't
    on its Receive screen (the "device nearby is sharing" beacon).
-7. BLE L2CAP (connection-oriented channels) as a faster Bluetooth path when no Wi-Fi link works
-   (phones list BLE_L2CAP among their upgrade mediums).
+7. BLE L2CAP: sending done (above). Receiving: advertise a PSM and listen, so phones can use it
+   too (their GATT connect to us is already fast; matters for the no-Wi-Fi fallback).

@@ -1,5 +1,5 @@
-# BlueZ keeps the adapter non-connectable unless it is discoverable; phones must be able to
-# connect for Quick Share.
+# Bluetooth settings for Quick Share (packaging/linux/quickshare-bt-setup): adapter connectable,
+# shorter LE connection interval (QS_LE_CONN_INTERVAL in /etc/default/quickshare-direct).
 [Unit]
 Description=Keep the Bluetooth adapter connectable (Quick Share)
 After=bluetooth.service
@@ -8,7 +8,8 @@ Wants=bluetooth.service
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 2
-ExecStart=/bin/sh -c 'btmgmt connectable on'
+EnvironmentFile=-/etc/default/quickshare-direct
+ExecStart=@LIBEXECDIR@/quickshare-bt-setup
 
 [Install]
 WantedBy=bluetooth.target

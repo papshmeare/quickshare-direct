@@ -42,6 +42,8 @@ pub struct BleReceiver {
     pub endpoint_id: [u8; 4],
     pub name: Option<String>,
     pub bt_mac: Option<[u8; 6]>,
+    /// LE L2CAP PSM the receiver listens on (advertisement extra fields), if any.
+    pub psm: Option<u16>,
 }
 
 /// Parses a 0xFEF3 BleAdvertisement for Nearby Sharing (format: docs/BLE_RECEIVER_DISCOVERY.md 4.1).
@@ -66,11 +68,20 @@ pub fn parse_receiver_advertisement(address: Address, data: &[u8]) -> Option<Ble
     let bt_mac = inner
         .get(9 + info_len..9 + info_len + 6)
         .and_then(|m| m.try_into().ok());
+    // After the data: device token (2), then an extra-fields mask; bit 0 = a 2-byte PSM follows
+    // (google/nearby mediums/ble/ble_advertisement.cc).
+    let extra = data.get(8 + len..).unwrap_or_default();
+    let psm = match extra {
+        [_, _, mask, hi, lo, ..] if mask & 0x01 != 0 => Some(u16::from_be_bytes([*hi, *lo])),
+        _ => None,
+    }
+    .filter(|p| *p != 0);
     Some(BleReceiver {
         address,
         endpoint_id,
         name,
         bt_mac,
+        psm,
     })
 }
 

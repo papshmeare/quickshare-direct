@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::channel::ChannelMessage;
 use crate::errors::AppError;
 use crate::hdl::{
-    BleReceiver, MigratableStream, OutboundPayload, OutboundRequest, TransferState, weave_connect,
+    BleReceiver, MigratableStream, OutboundPayload, OutboundRequest, TransferState, l2cap_connect,
+    weave_connect,
 };
 use crate::utils::{DeviceType, RemoteDeviceInfo};
 
@@ -33,8 +34,20 @@ pub async fn send_files_ble(
     sender: Sender<ChannelMessage>,
     ctk: CancellationToken,
 ) -> Result<TransferState, anyhow::Error> {
-    let stream = tokio::select! {
-        s = weave_connect(adapter, receiver.address) => s?,
+    // Bluetooth link: the receiver's L2CAP channel when it advertises one (faster, sets up
+    // sooner), else (or if that fails) its GATT/weave socket. QSD_BLE_L2CAP=0 forces weave.
+    let connect = async {
+        let l2cap = std::env::var("QSD_BLE_L2CAP").map(|v| v != "0").unwrap_or(true);
+        if l2cap && receiver.psm.is_some() {
+            match l2cap_connect(adapter, receiver).await {
+                Ok(s) => return Ok((s, true)),
+                Err(e) => warn!("L2CAP to the receiver failed ({e}); using GATT"),
+            }
+        }
+        weave_connect(adapter, receiver.address).await.map(|s| (s, false))
+    };
+    let (stream, over_l2cap) = tokio::select! {
+        s = connect => s?,
         _ = ctk.cancelled() => return Ok(TransferState::Cancelled),
     };
     let mut or = OutboundRequest::new(
@@ -49,6 +62,11 @@ pub async fn send_files_ble(
         },
     );
     or.set_hold_files_for_upgrade(true);
+    or.set_slow_link(true);
+    if over_l2cap {
+        let chunk = std::env::var("QSD_L2CAP_CHUNK").ok().and_then(|c| c.parse().ok());
+        or.set_chunk_size(chunk.unwrap_or(L2CAP_CHUNK_SIZE));
+    }
     or.send_connection_request().await?;
     or.send_ukey2_client_init().await?;
 
@@ -98,6 +116,10 @@ pub async fn send_files_ble(
         }
     }
 }
+
+/// File data per frame over a BLE L2CAP channel. Each frame must fit one L2CAP SDU (the Pixel
+/// drops the link on a 64 KB chunk); 16 KB measured 46 KB/s against 38 KB/s with Nearby's 1 KB.
+const L2CAP_CHUNK_SIZE: usize = 16 * 1024;
 
 /// How long to hold the files after Accept for the receiver's upgrade offer.
 const UPGRADE_WAIT: Duration = Duration::from_secs(10);

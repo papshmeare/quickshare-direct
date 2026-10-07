@@ -26,6 +26,7 @@
           postInstall = ''
             install -Dm755 ${./packaging/linux/quickshare-ap} $out/libexec/quickshare-ap
             install -Dm755 ${./packaging/linux/quickshare-join} $out/libexec/quickshare-join
+            install -Dm755 ${./packaging/linux/quickshare-bt-setup} $out/libexec/quickshare-bt-setup
             patchShebangs $out/libexec
             # "Send with Quick Share" in the file manager's Open With menu.
             install -Dm644 ${./packaging/linux/quickshare-direct-send.desktop} \
@@ -90,6 +91,15 @@
                 connection (many chips can't host one there, others are slow): auto = leave the
                 Wi-Fi network for the transfer only when there's no other way (internet pauses for
                 a few seconds), always = whenever the channels differ (full speed), never = don't.
+              '';
+            };
+            leConnInterval = lib.mkOption {
+              type = lib.types.str;
+              default = "6 12";
+              description = ''
+                LE connection interval ("MIN MAX" in 1.25 ms units) for the Bluetooth links the laptop
+                opens; the kernel default (24 40 = 30-50 ms) limits sending over Bluetooth to ~5 KB/s.
+                "off" keeps the kernel default.
               '';
             };
             classicBluetooth = lib.mkOption {
@@ -159,10 +169,12 @@
               after = [ "bluetooth.service" ];
               wants = [ "bluetooth.service" ];
               wantedBy = [ "bluetooth.target" ];
+              path = with pkgs; [ bluez coreutils ];
+              environment.QS_LE_CONN_INTERVAL = cfg.leConnInterval;
               serviceConfig = {
                 Type = "oneshot";
                 ExecStartPre = "${pkgs.coreutils}/bin/sleep 2";
-                ExecStart = "${pkgs.bluez}/bin/btmgmt connectable on";
+                ExecStart = "${pkgs.bash}/bin/sh ${pkg}/libexec/quickshare-bt-setup";
               };
             };
 
